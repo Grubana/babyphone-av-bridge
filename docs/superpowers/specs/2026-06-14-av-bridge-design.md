@@ -20,7 +20,9 @@ op `0x0000` video keyframe, `0x0100` inter, `0x0201` audio).
 **In scope:**
 - A C++17 static mipsel32 binary (`av-bridge`), built with the existing
   `mipsel32-toolchain` image, deployed like `babyphone-mock`.
-- Intercept ppsapp's outbound :11224 connection on the camera via iptables DNAT.
+- Intercept ppsapp's outbound :11224 connection via an `LD_PRELOAD` `connect()`
+  interposer (the device has **no iptables**, and `10.10.10.1` is hardcoded in
+  ppsapp, so a syscall-level rewrite is the mechanism).
 - **Dual mode**, auto-selected per connection:
   - **Mode A (tee):** real monitor reachable → transparent byte-relay both ways +
     passive media tap. Monitor and website both work.
@@ -31,7 +33,8 @@ op `0x0000` video keyframe, `0x0100` inter, `0x0201` audio).
 - An HTTP server (serves a static page + assets) + a minimal WebSocket server
   pushing H.264 NALUs + G.711 µ-law to the browser.
 - A browser page: jMuxer → MSE for video; µ-law→PCM→Web Audio for audio.
-- Deploy helper `setup-iptables.sh`.
+- The `connect()` interposer `.so` + `install-hook.sh` (adds it to
+  `/etc/ld.so.preload`).
 
 **Out of scope:**
 - Re-encoding/transcoding (the mipsel CPU can't do it live — remux only).
@@ -43,9 +46,13 @@ op `0x0000` video keyframe, `0x0100` inter, `0x0201` audio).
 ## Decisions
 
 - **Device:** the same mipsel32 camera we deploy `babyphone-mock` to; root shell,
-  writable storage, can run static binaries, has iptables (to confirm `nat`/mark).
-- **Capture:** iptables DNAT of ppsapp's outbound `10.10.10.1:11224` →
-  `127.0.0.1:<listen>`; our binary accepts it. Dual-mode A/B chosen per connection.
+  writable storage, runs static binaries. **No iptables**; ppsapp is dynamically
+  linked against **uClibc-0.9.33.2**; `10.10.10.1` is hardcoded in ppsapp.
+- **Capture:** an `LD_PRELOAD` `connect()` interposer (`hook.so`) rewrites
+  ppsapp's outbound `10.10.10.1:11224` → `127.0.0.1:<listen>`, installed globally
+  via `/etc/ld.so.preload`. The bridge itself is **statically linked**, so it is
+  immune to the preload and dials the real monitor unmodified (Mode A). Dual-mode
+  A/B chosen per connection.
 - **Playback:** WebSocket + MSE (jMuxer, video) + Web Audio (µ-law, audio). No
   server transcoding.
 - **Transport security:** plain `http://`/`ws://` (LAN).
@@ -58,10 +65,10 @@ hub fan-out, and the HTTP/WS server, each supervised (restart on throw) with
 SIGINT/SIGTERM shutdown.
 
 ```
-                         iptables DNAT (10.10.10.1:11224 -> 127.0.0.1:LP)
+        LD_PRELOAD hook.so rewrites ppsapp's connect(10.10.10.1:11224) -> 127.0.0.1:LP
 ppsapp (camera) ───────────────────────────────────────────────▶ relay.accept()
                                                                      │
-       on accept, relay dials the real monitor (SO_MARK'd, DNAT-exempt):
+       on accept, relay dials the real monitor (bridge is static -> not hooked):
          reachable  ─▶ MODE A: splice cam<->mon verbatim; copy cam->mon bytes to tap
          unreachable─▶ MODE B: emulate monitor (replay announce/ctl/heartbeat); tap
                                                                      │
@@ -73,7 +80,8 @@ http+ws server ◀────────────────────�
 
 ### Mode selection (per connection)
 On each accepted ppsapp connection, dial the real monitor with a short timeout
-(e.g. 500 ms):
+(e.g. 500 ms). Because the bridge is statically linked, its own `connect()` is
+*not* rewritten by the preload, so it reaches the real `10.10.10.1` — no loop:
 - **connect ok → Mode A.** Two threads splice bytes verbatim in both directions.
   The cam→mon copy is also fed to the tap. We are protocol-agnostic here; the
   real monitor drives login/announce/heartbeat. Monitor unaffected.
@@ -102,8 +110,14 @@ subset is confirmed on-device by watching whether media sustains.
 - `src/babycam_codec.{h,cpp}` — `parse_frame`/`FrameReader` (magic, additive
   checksum, partial-buffer framing, resync) + `MediaDemuxer` (type-8; H.264 from
   first `00 00 00 01`; G.711 from `body[20:]`). Mirrors `babycam_client.py`.
-- `src/relay.{h,cpp}` — accept; dial monitor (SO_MARK); Mode A splice + tap, or
-  hand off to Mode B emulator. Tap is a read-only byte copy → FrameReader.
+- `src/relay.{h,cpp}` — accept; dial monitor (plain connect, short timeout); Mode A
+  splice + tap, or hand off to Mode B emulator. Tap is a read-only byte copy →
+  FrameReader.
+- `hook/hook.c` — the `connect()` interposer: a freestanding (`-nostdlib`,
+  raw-syscall) `.so` that rewrites ppsapp's `10.10.10.1:11224` connect to
+  `127.0.0.1:<listen>` and forwards everything else unchanged. Freestanding so it
+  loads into a uClibc process despite our glibc toolchain. Built as a separate
+  CMake target.
 - `src/monitor_emulator.{h,cpp}` — Mode B: the captured announce + a
   `msg_type_cmd → reply-bytes` table + heartbeat reply. Reply bytes live in a
   committed generated header `src/monitor_replies.h` (a `gen_monitor_replies.py`
@@ -123,16 +137,21 @@ subset is confirmed on-device by watching whether media sustains.
   server serves them from memory.
 - `src/main.cpp` — CLI (`--monitor-ip`, `--monitor-port`, `--listen-port`,
   `--web-port`), supervised threads, signals.
-- `setup-iptables.sh` — DNAT + SO_MARK RETURN rule; `teardown-iptables.sh`.
+- `install-hook.sh` — copies `hook.so` to the device and adds its path to
+  `/etc/ld.so.preload`; `uninstall-hook.sh` removes it.
 
-### The DNAT loop fix
-DNAT redirects *all* :11224-bound traffic, including the relay's own dial to the
-monitor. The relay sets `SO_MARK = 0x1` on its monitor socket; iptables `OUTPUT`
-(nat) does `-m mark --mark 0x1 -j RETURN` **before** the DNAT rule, so the
-relay's connection reaches the real monitor while ppsapp's is redirected.
-(Requires `nat` table + `MARK`/`DNAT` match in the device kernel — confirmed
-on-device; if absent, fallbacks: a dedicated UID + `--uid-owner` RETURN, or bind
-ppsapp to a hostname we can repoint.)
+### Redirect mechanism (no iptables)
+`hook.so` exports `connect()`. The dynamic linker (uClibc honors
+`/etc/ld.so.preload`) binds our `connect` ahead of libc's for every dynamically
+linked process. The hook inspects the `sockaddr`: if it is
+`AF_INET 10.10.10.1:11224` it copies the address, rewrites it to
+`127.0.0.1:<listen>`, and performs the connect via a **raw MIPS syscall**
+(`__NR_connect`); all other connects are forwarded unchanged via the same
+syscall. No libc symbols are referenced, so the glibc-built `.so` loads cleanly
+into the uClibc ppsapp. The **bridge is statically linked**, so the preload does
+not apply to it and its dial to the real monitor is never rewritten — no loop,
+no marks. Install once via `/etc/ld.so.preload`; ppsapp picks it up on its next
+(watchdog) restart.
 
 ## Testing
 
@@ -152,14 +171,27 @@ ppsapp to a hostname we can repoint.)
   unreachable to exercise A and B), and a WS client probe that connects and
   asserts it receives a keyframe-led H.264 stream + audio. Covers
   relay+tap+hub+WS end-to-end (everything except iptables).
-- **On-device:** apply `setup-iptables.sh`, run the binary, confirm (a) with the
-  monitor up the monitor still works and the website plays; (b) with the monitor
-  down the website still plays. Browser is the final check.
+- **Hook validation (on-device, before full deploy):** install `hook.so` via
+  `/etc/ld.so.preload`, confirm it loads into ppsapp (e.g. it appears in
+  `/proc/<ppsapp-pid>/maps` after restart) and that `/proc/net/tcp` then shows
+  ppsapp connected to `127.0.0.1:<listen>` instead of `10.10.10.1:11224`. This is
+  the make-or-break step for the glibc-built freestanding `.so` in uClibc.
+- **On-device end-to-end:** run the bridge, confirm (a) monitor up → monitor still
+  works and the website plays; (b) monitor down → website still plays. Browser is
+  the final check.
 
 ## Risks / open items
 
-- **iptables `nat`/`mark` support** on the device kernel — confirm first; have UID
-  and hostname-repoint fallbacks.
+- **Freestanding `.so` loads into uClibc** — the top risk. A glibc-toolchain build
+  with `-nostdlib` + raw syscalls should have no libc deps and load anywhere;
+  validated on-device by the hook-validation step. Fallback if it won't load:
+  build a matching uClibc cross-toolchain and a normal `dlsym(RTLD_NEXT)` interposer.
+- **`/etc/ld.so.preload` is global** — the hook must be a strict no-op for every
+  connect except ppsapp's specific destination, and must never crash (it runs in
+  every dynamically linked process). It only ever rewrites `10.10.10.1:11224`.
+- **ppsapp watchdog/restart** — installing via `/etc/ld.so.preload` means the hook
+  is picked up on ppsapp's next restart automatically; if no watchdog restarts it,
+  restart ppsapp manually once.
 - **Mode B mandatory-reply subset** — [?] in the spec; mitigated by replaying
   captured monitor bytes, finalized by on-device observation.
 - **jMuxer/MSE** with this exact H.264 (Main, level 5.1, 640×360, ~10 fps) — broadly
@@ -174,5 +206,6 @@ ppsapp to a hostname we can repoint.)
   (15/553/1418).
 - Static mipsel32 binary builds and runs under QEMU; the pipeline integration test
   passes for both Mode A and Mode B.
-- On-device: website plays live video+audio with the monitor present (monitor
-  unaffected) AND with the monitor absent.
+- On-device: the `hook.so` loads into ppsapp and redirects its connection to the
+  local bridge; the website plays live video+audio with the monitor present
+  (monitor unaffected) AND with the monitor absent.
