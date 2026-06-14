@@ -170,7 +170,7 @@ no marks. Install once via `/etc/ld.so.preload`; ppsapp picks it up on its next
   synthesized type-8 frames (keyframe-led), a fake monitor (toggle reachable/
   unreachable to exercise A and B), and a WS client probe that connects and
   asserts it receives a keyframe-led H.264 stream + audio. Covers
-  relay+tap+hub+WS end-to-end (everything except iptables).
+  relay+tap+hub+WS end-to-end (everything except the on-device hook).
 - **Hook validation (on-device, before full deploy):** install `hook.so` via
   `/etc/ld.so.preload`, confirm it loads into ppsapp (e.g. it appears in
   `/proc/<ppsapp-pid>/maps` after restart) and that `/proc/net/tcp` then shows
