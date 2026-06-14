@@ -12,7 +12,7 @@ camera itself — so a browser on the LAN can watch/listen live. It must work
 
 The camera's `ppsapp` is the initiator: it dials OUT to the monitor on TCP
 **11224** and pushes A/V using the framed protocol in
-`../babycam_protocol_spec.md` (magic `56565099`, additive checksum, type-8 media:
+`reference/babycam_protocol_spec.md` (magic `56565099`, additive checksum, type-8 media:
 op `0x0000` video keyframe, `0x0100` inter, `0x0201` audio).
 
 ## Scope
@@ -86,7 +86,7 @@ ppsapp reconnects and we re-evaluate → Mode B. Transitions ride the camera's
 natural reconnect. No mid-session mode switching needed.
 
 ### Mode B fidelity — replay captured monitor bytes
-`babyphone_boot.pcap` contains the real monitor's *entire* side of a session
+`test-fixtures/babyphone_boot.pcap` contains the real monitor's *entire* side of a session
 startup: **1 ANNOUNCE (type 2) + 20 CONTROL (type 7) + 3 HEARTBEAT (type 12)**,
 and media flows (cam→mon shows 1 keyframe + 33 inter + 85 audio). Mode B is built
 by extracting those monitor→camera frames from the capture and replaying them:
@@ -107,7 +107,7 @@ subset is confirmed on-device by watching whether media sustains.
 - `src/monitor_emulator.{h,cpp}` — Mode B: the captured announce + a
   `msg_type_cmd → reply-bytes` table + heartbeat reply. Reply bytes live in a
   committed generated header `src/monitor_replies.h` (a `gen_monitor_replies.py`
-  host script extracts the monitor→camera frames from `babyphone_boot.pcap` into
+  host script extracts the monitor→camera frames from `test-fixtures/babyphone_boot.pcap` into
   C++ byte arrays; the script + its output are committed so the device build needs
   no pcap).
 - `src/stream_hub.{h,cpp}` — thread-safe: latest SPS/PPS, a bounded recent-NALU
@@ -140,12 +140,12 @@ ppsapp to a hostname we can repoint.)
   - `build_frame`→`parse_frame` round-trip; multi-frame buffer; partial-buffer
     incremental framing; checksum-mismatch resync.
   - type-8 keyframe: H.264 extracted from the first start code; audio: `body[20:]`.
-  - **pcap regression:** a test fixture replays `babyphone_monitor.pcap`
+  - **pcap regression:** a test fixture replays `test-fixtures/babyphone_monitor.pcap`
     (cam→mon direction) through the C++ demuxer and asserts
     **keyframes=15, inter=553, audio=1418** — the exact counts validated with the
     reference. (The pcaps live in the repo root; the test reads them via a path.)
 - **Mode B replay test:** extract the monitor→camera frames from
-  `babyphone_boot.pcap`; assert the emulator's announce + ack table reproduce
+  `test-fixtures/babyphone_boot.pcap`; assert the emulator's announce + ack table reproduce
   those bytes for the observed `msg_type_cmd`s.
 - **Pipeline integration (QEMU):** a fake ppsapp that connects and pushes
   synthesized type-8 frames (keyframe-led), a fake monitor (toggle reachable/
