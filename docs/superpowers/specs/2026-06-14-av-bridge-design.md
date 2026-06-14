@@ -143,7 +143,7 @@ ppsapp to a hostname we can repoint.)
   - **pcap regression:** a test fixture replays `test-fixtures/babyphone_monitor.pcap`
     (cam→mon direction) through the C++ demuxer and asserts
     **keyframes=15, inter=553, audio=1418** — the exact counts validated with the
-    reference. (The pcaps live in the repo root; the test reads them via a path.)
+    reference. (The pcaps live in `test-fixtures/`, mounted into the build container.)
 - **Mode B replay test:** extract the monitor→camera frames from
   `test-fixtures/babyphone_boot.pcap`; assert the emulator's announce + ack table reproduce
   those bytes for the observed `msg_type_cmd`s.
