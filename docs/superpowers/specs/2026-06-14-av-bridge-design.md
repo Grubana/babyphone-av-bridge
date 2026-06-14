@@ -186,9 +186,17 @@ no marks. Install once via `/etc/ld.so.preload`; ppsapp picks it up on its next
   with `-nostdlib` + raw syscalls should have no libc deps and load anywhere;
   validated on-device by the hook-validation step. Fallback if it won't load:
   build a matching uClibc cross-toolchain and a normal `dlsym(RTLD_NEXT)` interposer.
-- **`/etc/ld.so.preload` is global** — the hook must be a strict no-op for every
-  connect except ppsapp's specific destination, and must never crash (it runs in
-  every dynamically linked process). It only ever rewrites `10.10.10.1:11224`.
+- **`/etc/ld.so.preload` is global** — it injects into every dynamically linked
+  process (incl. sshd/shell), so a bad `.so` could break remote access. Mitigated
+  by: the hook is a strict, crash-proof passthrough that only ever rewrites
+  `10.10.10.1:11224` (forwarding all else verbatim via raw syscall); and
+  `install-hook.sh` (a) **pre-flight-tests** that the `.so` loads
+  (`LD_PRELOAD=hook.so /bin/true`) before touching `/etc`, and (b) arms a
+  **dead-man switch** (`( sleep N; : > /etc/ld.so.preload ) &`, builtins only, so
+  it self-heals even if `exec` is globally broken) that auto-disables the preload
+  unless the operator cancels it after confirming SSH still works. The launcher is
+  on the read-only partition, so targeted per-ppsapp injection isn't possible —
+  global preload is the chosen mechanism.
 - **ppsapp watchdog/restart** — installing via `/etc/ld.so.preload` means the hook
   is picked up on ppsapp's next restart automatically; if no watchdog restarts it,
   restart ppsapp manually once.
