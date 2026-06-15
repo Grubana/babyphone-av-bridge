@@ -36,7 +36,7 @@ endif()
 
 if(BUILD_TESTS)
     enable_testing()
-    add_executable(av_tests tests/smoke_test.cpp)
+    add_executable(av_tests tests/frame_test.cpp)
     target_link_libraries(av_tests PRIVATE bridgelib)
     set_target_properties(av_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY tests)
     if(STATIC_LINK)
