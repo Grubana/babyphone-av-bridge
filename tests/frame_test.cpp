@@ -45,3 +45,14 @@ TEST_CASE("bad checksum resyncs to the next frame") {
     REQUIRE(frames.size() == 1);
     CHECK(frames[0].type == 8);
 }
+
+TEST_CASE("parses a frame whose checksum has the high bit set (no shift UB)") {
+    // body chosen so the additive checksum's top byte is >= 0x80
+    std::vector<uint8_t> body(64, 0xFF);   // large additive sum -> high bytes set
+    auto wire = buildFrame(8, body);
+    size_t next = 0;
+    auto fr = parseFrame(wire, 0, next);
+    REQUIRE(fr.has_value());
+    CHECK(fr->body == body);
+    CHECK(next == wire.size());
+}

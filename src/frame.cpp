@@ -45,8 +45,8 @@ std::optional<Frame> parseFrame(const std::vector<uint8_t>& buf, size_t start, s
     uint32_t lengthField = (buf[s + 6] << 8) | buf[s + 7];
     size_t total = lengthField + 0x0C;
     if (buf.size() - s < total) { next = (size_t)s; return std::nullopt; }
-    uint32_t stored = (buf[s + total - 4] << 24) | (buf[s + total - 3] << 16) |
-                      (buf[s + total - 2] << 8) | buf[s + total - 1];
+    uint32_t stored = ((uint32_t)buf[s + total - 4] << 24) | ((uint32_t)buf[s + total - 3] << 16) |
+                      ((uint32_t)buf[s + total - 2] << 8) | (uint32_t)buf[s + total - 1];
     if (additiveChecksum(buf.data() + s, total - 4) != stored) { next = (size_t)s + 1; return std::nullopt; }
     Frame fr;
     fr.type = t0 >> 4;
