@@ -34,7 +34,7 @@ int connect(int fd, const void *addr, unsigned int len) {
             buf[2] = (LISTEN_PORT >> 8) & 0xff;   /* port (big-endian) */
             buf[3] = LISTEN_PORT & 0xff;
             buf[4] = 127; buf[5] = 0; buf[6] = 0; buf[7] = 1;   /* 127.0.0.1 */
-            return (int)raw_connect(fd, buf, len);
+            return (int)raw_connect(fd, buf, n);   /* clamped len: never read past buf */
         }
     }
     return (int)raw_connect(fd, addr, len);
