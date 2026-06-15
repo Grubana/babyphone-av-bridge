@@ -29,10 +29,19 @@ void runMonitorEmulator(int camFd, StreamHub& hub) {
     FrameReader reader;
     uint8_t buf[8192];
     std::fprintf(stderr, "[emu] session start\n");
-    int nframes = 0;
+    int nframes = 0, idle = 0;
     while (true) {
         ssize_t n = ::recv(camFd, buf, sizeof(buf), 0);
-        if (n <= 0) { std::fprintf(stderr, "[emu] session end: recv=%zd errno=%d after %d frames\n", n, errno, nframes); break; }
+        if (n == 0) { std::fprintf(stderr, "[emu] session end: peer closed after %d frames\n", nframes); break; }
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+                std::fprintf(stderr, "[emu] idle tick %d (connection open, no camera data yet)\n", ++idle);
+                continue;   // read timeout is NOT a disconnect — keep waiting
+            }
+            std::fprintf(stderr, "[emu] session end: recv error errno=%d after %d frames\n", errno, nframes);
+            break;
+        }
+        idle = 0;
         for (auto& fr : reader.feed(buf, (size_t)n)) {
             ++nframes;
             auto mu = extractMedia(fr);
