@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 project(av_bridge CXX)
+enable_language(C)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(STATIC_LINK "Statically link" ON)
@@ -41,6 +42,14 @@ target_link_libraries(av-bridge PRIVATE bridgelib)
 if(STATIC_LINK)
     target_link_options(av-bridge PRIVATE -static)
 endif()
+
+# Freestanding LD_PRELOAD connect() interposer for ppsapp. Built always (not
+# gated by BUILD_TESTS): -nostdlib so the glibc-toolchain .so loads into uClibc.
+set(AVB_LISTEN_PORT 11225 CACHE STRING "port the hook redirects ppsapp to")
+add_library(hook MODULE hook/hook.c)
+set_target_properties(hook PROPERTIES PREFIX "" OUTPUT_NAME hook SUFFIX ".so")
+target_compile_options(hook PRIVATE -fPIC -O2 -DLISTEN_PORT=${AVB_LISTEN_PORT})
+target_link_options(hook PRIVATE -nostdlib -shared)
 
 if(BUILD_TESTS)
     enable_testing()
