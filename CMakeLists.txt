@@ -15,7 +15,8 @@ target_include_directories(thirdparty INTERFACE third_party)
 add_library(bridgelib STATIC
     src/frame.cpp
     src/media.cpp
-    src/pcap.cpp)
+    src/pcap.cpp
+    src/stream_hub.cpp)
 target_include_directories(bridgelib PUBLIC src third_party)
 target_link_libraries(bridgelib PUBLIC mbedcrypto thirdparty)
 find_package(Threads REQUIRED)
@@ -38,7 +39,7 @@ endif()
 
 if(BUILD_TESTS)
     enable_testing()
-    add_executable(av_tests tests/frame_test.cpp tests/media_test.cpp)
+    add_executable(av_tests tests/frame_test.cpp tests/media_test.cpp tests/hub_test.cpp)
     target_link_libraries(av_tests PRIVATE bridgelib)
     set_target_properties(av_tests PROPERTIES RUNTIME_OUTPUT_DIRECTORY tests)
     if(STATIC_LINK)
