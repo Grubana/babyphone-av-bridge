@@ -3,6 +3,7 @@
 #include "frame.h"
 #include "media.h"
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 #include <cstdio>
 #include <cerrno>
@@ -26,22 +27,23 @@ static void dumpBody(const char* tag, const std::vector<uint8_t>& b) {
 }
 
 void runMonitorEmulator(int camFd, StreamHub& hub) {
+    // Set an EXPLICIT 1s recv timeout so a read gap blocks (~1 wake/sec) instead of
+    // spinning — do NOT rely on the accepted socket inheriting the listener's timeout
+    // (it may not on this kernel, which would busy-loop and peg the CPU).
+    struct timeval tv; tv.tv_sec = 1; tv.tv_usec = 0;
+    ::setsockopt(camFd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     FrameReader reader;
     uint8_t buf[8192];
     std::fprintf(stderr, "[emu] session start\n");
-    int nframes = 0, idle = 0;
+    int nframes = 0;
     while (true) {
         ssize_t n = ::recv(camFd, buf, sizeof(buf), 0);
         if (n == 0) { std::fprintf(stderr, "[emu] session end: peer closed after %d frames\n", nframes); break; }
         if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-                std::fprintf(stderr, "[emu] idle tick %d (connection open, no camera data yet)\n", ++idle);
-                continue;   // read timeout is NOT a disconnect — keep waiting
-            }
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) continue;  // timeout: keep waiting, no log spam, no spin
             std::fprintf(stderr, "[emu] session end: recv error errno=%d after %d frames\n", errno, nframes);
             break;
         }
-        idle = 0;
         for (auto& fr : reader.feed(buf, (size_t)n)) {
             ++nframes;
             auto mu = extractMedia(fr);
