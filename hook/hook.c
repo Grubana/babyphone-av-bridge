@@ -23,8 +23,11 @@ static long raw_connect(int fd, const void *addr, unsigned len) {
         : "+r"(v0), "+r"(a3)
         : "r"(a0), "r"(a1), "r"(a2)
         : "$1","$3","$8","$9","$10","$11","$12","$13","$14","$15","$24","$25","memory");
-    if (a3 != 0) { *__errno_location() = (int)v0; return -1; }   /* incl. EINPROGRESS */
-    return v0;                     /* 0 on success */
+    /* Copy $2/$7 into plain locals BEFORE calling __errno_location(): that call
+     * clobbers $2 (its return reg), which would otherwise corrupt v0. */
+    long ret = v0, err = a3;
+    if (err != 0) { *__errno_location() = (int)ret; return -1; }   /* incl. EINPROGRESS */
+    return ret;                    /* 0 on success */
 }
 
 int connect(int fd, const void *addr, unsigned int len) {
