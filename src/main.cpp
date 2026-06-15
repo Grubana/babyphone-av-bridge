@@ -26,13 +26,13 @@ static void supervise(const char* name, F fn) {
 
 int main(int argc, char** argv) {
     std::string monIp = "10.10.10.1";
-    uint16_t monPort = 11224, listenPort = 11224, webPort = 8080;
+    uint16_t monPort = 11224, listenPort = 11225, webPort = 8080;  // listen default matches hook LISTEN_PORT
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto val = [&](const char* d){ return std::string(i + 1 < argc ? argv[++i] : d); };
         if (a == "--monitor-ip") monIp = val("10.10.10.1");
         else if (a == "--monitor-port") monPort = (uint16_t)std::stoi(val("11224"));
-        else if (a == "--listen-port") listenPort = (uint16_t)std::stoi(val("11224"));
+        else if (a == "--listen-port") listenPort = (uint16_t)std::stoi(val("11225"));
         else if (a == "--web-port") webPort = (uint16_t)std::stoi(val("8080"));
     }
     std::printf("av-bridge: listen :%u  monitor %s:%u  web :%u\n", listenPort, monIp.c_str(), monPort, webPort);

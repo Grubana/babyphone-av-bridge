@@ -30,7 +30,7 @@ cat <<EOF
 NEXT (in THIS session; if anything misbehaves just wait ${DEADMAN}s and it reverts):
   kill \$(pidof ppsapp)                              # watchdog relaunches it with the hook
   cat /proc/\$(pidof ppsapp)/maps | grep hook.so      # confirm the hook loaded into ppsapp
-  cat /proc/net/tcp | grep -i 2BD8                    # ppsapp dest should be 0100007F (127.0.0.1)
+  cat /proc/net/tcp | grep -i 2BD9                    # ppsapp dest should be 0100007F:2BD9 (127.0.0.1:11225)
   # open a SECOND ssh session and run a command to prove remote access still works
 If all good, CANCEL the dead-man switch so the hook persists:
   kill $DM

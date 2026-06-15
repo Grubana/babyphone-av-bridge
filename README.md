@@ -98,8 +98,9 @@ freestanding syscall.)
 
 After install + ppsapp restart:
 - `/proc/$(pidof ppsapp)/maps` should list `hook.so`.
-- `/proc/net/tcp` should show ppsapp's destination as `0100007F:2BD8`
-  (127.0.0.1:11224) instead of `010A0A0A:2BD8` (10.10.10.1:11224).
+- `/proc/net/tcp` should show ppsapp's destination as `0100007F:2BD9`
+  (127.0.0.1:11225, the bridge's --listen-port) instead of `010A0A0A:2BD8`
+  (10.10.10.1:11224, the real monitor).
 
 ## SSH safety
 
