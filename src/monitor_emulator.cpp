@@ -52,6 +52,12 @@ void runMonitorEmulator(int camFd, StreamHub& hub) {
             if (fr.type == 1) {                                   // login -> announce
                 ssize_t s = ::send(camFd, monrep::announce, monrep::announce_len, 0);
                 std::fprintf(stderr, "[emu]   -> announce (%zu bytes, sent=%zd)\n", monrep::announce_len, s);
+                /* The real monitor PROACTIVELY sends CONTROL 0x000d (START/enable) right
+                 * after the announce (capture t=134ms, before the camera's control burst).
+                 * Replay it so the camera proceeds to streaming. */
+                size_t dl = 0; const unsigned char* dstart = findReply(0x000d, dl);
+                if (dstart) { ssize_t ds = ::send(camFd, dstart, dl, 0); std::fprintf(stderr, "[emu]   -> proactive 0x000d START (%zu bytes, sent=%zd)\n", dl, ds); }
+                else std::fprintf(stderr, "[emu]   !! no captured 0x000d to send\n");
             } else if (fr.type == 7 && fr.body.size() >= 2) {     // control -> captured reply or echo
                 size_t rl = 0; const unsigned char* r = findReply(cmd, rl);
                 if (r) { ssize_t s = ::send(camFd, r, rl, 0); std::fprintf(stderr, "[emu]   -> captured reply cmd=0x%04x (%zu bytes, sent=%zd)\n", cmd, rl, s); }
