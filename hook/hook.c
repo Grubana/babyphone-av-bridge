@@ -1,12 +1,18 @@
 /* Freestanding LD_PRELOAD connect() interposer for mipsel (uClibc target).
  * Build: mipsel-linux-gnu-gcc -shared -fPIC -nostdlib -O2 -DLISTEN_PORT=11225 -o hook.so hook.c
  * Rewrites a connect to 10.10.10.1:11224 -> 127.0.0.1:LISTEN_PORT; forwards all else.
- * No libc symbols are referenced, so it loads into any libc (glibc-built, uClibc host). */
+ * No NEEDED libs: the only external reference is __errno_location, an UNDEF symbol
+ * resolved at load time against the libc already in the process (uClibc). This lets
+ * us set errno exactly like the real connect() — critical, because the process's
+ * other (non-target) connects are non-blocking and rely on errno==EINPROGRESS. */
 #ifndef LISTEN_PORT
 #define LISTEN_PORT 11225
 #endif
 
-/* MIPS o32: __NR_connect = 4170. Args $a0-$a2, num $v0, error flag in $a3. */
+extern int *__errno_location(void);   /* resolved against the host libc at load */
+
+/* MIPS o32: __NR_connect = 4170. Args $a0-$a2, num $v0, error flag in $a3.
+ * On error $a3!=0 and $v0 holds the (positive) errno; mirror libc: set errno, return -1. */
 static long raw_connect(int fd, const void *addr, unsigned len) {
     register long v0 asm("$2") = 4170;
     register long a0 asm("$4") = fd;
@@ -17,8 +23,8 @@ static long raw_connect(int fd, const void *addr, unsigned len) {
         : "+r"(v0), "+r"(a3)
         : "r"(a0), "r"(a1), "r"(a2)
         : "$1","$3","$8","$9","$10","$11","$12","$13","$14","$15","$24","$25","memory");
-    if (a3 != 0) return -1;        /* error: mimic libc's -1 (errno not set; see README) */
-    return v0;                     /* 0 on success for a blocking connect */
+    if (a3 != 0) { *__errno_location() = (int)v0; return -1; }   /* incl. EINPROGRESS */
+    return v0;                     /* 0 on success */
 }
 
 int connect(int fd, const void *addr, unsigned int len) {
