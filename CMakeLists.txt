@@ -16,7 +16,10 @@ add_library(bridgelib STATIC
     src/frame.cpp
     src/http.cpp
     src/media.cpp
+    src/monitor_emulator.cpp
     src/pcap.cpp
+    src/relay.cpp
+    src/server.cpp
     src/stream_hub.cpp
     src/websocket.cpp)
 target_include_directories(bridgelib PUBLIC src third_party)
