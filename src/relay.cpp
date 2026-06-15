@@ -36,12 +36,20 @@ int dialMonitor(const std::string& ip, uint16_t port, int timeoutMs) {
     return fd;
 }
 
+static void firstBytes(const char* tag, const uint8_t* d, size_t n) {
+    char hex[3 * 48 + 1]; size_t m = n < 48 ? n : 48, k = 0;
+    for (size_t i = 0; i < m; ++i) k += (size_t)std::snprintf(hex + k, sizeof(hex) - k, "%02x ", d[i]);
+    std::fprintf(stderr, "[relay] FIRST %s (%zd bytes): %s\n", tag, n, hex);
+}
+
 static void teeCamToMon(int camFd, int monFd, StreamHub& hub) {
     FrameReader reader;
     uint8_t buf[8192];
+    bool first = true;
     while (true) {
         ssize_t n = ::recv(camFd, buf, sizeof(buf), 0);
         if (n <= 0) break;
+        if (first) { firstBytes("cam->mon", buf, n); first = false; }
         if (monFd >= 0 && ::send(monFd, buf, n, 0) != n) break;
         for (auto& fr : reader.feed(buf, (size_t)n)) {
             auto mu = extractMedia(fr);
@@ -50,11 +58,13 @@ static void teeCamToMon(int camFd, int monFd, StreamHub& hub) {
     }
 }
 
-static void pump(int from, int to) {
+static void pump(const char* tag, int from, int to) {
     uint8_t buf[8192];
+    bool first = true;
     while (true) {
         ssize_t n = ::recv(from, buf, sizeof(buf), 0);
         if (n <= 0) break;
+        if (first) { firstBytes(tag, buf, n); first = false; }
         if (::send(to, buf, n, 0) != n) break;
     }
 }
@@ -63,7 +73,7 @@ void Relay::session(int camFd) {
     int monFd = dialMonitor(monitorIp_, monitorPort_, 500);
     if (monFd >= 0) {
         std::fprintf(stderr, "[relay] Mode A (tee): monitor up\n");
-        std::thread back([monFd, camFd]{ pump(monFd, camFd); });  // monitor -> camera
+        std::thread back([monFd, camFd]{ pump("mon->cam", monFd, camFd); });  // monitor -> camera
         teeCamToMon(camFd, monFd, hub_);                          // camera -> monitor (+tap)
         ::shutdown(monFd, SHUT_RDWR); ::shutdown(camFd, SHUT_RDWR);
         back.join();
