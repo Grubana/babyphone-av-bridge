@@ -45,7 +45,7 @@ function feedLevel(samples) {
   if (v > targetLevel) targetLevel = v;
 }
 const root = document.documentElement.style;
-(function tick() {
+function tick() {
   targetLevel *= 0.86;
   level += (targetLevel - level) * 0.35;
   // sustained activity rises while there's real sound, decays slowly when quiet
@@ -58,7 +58,9 @@ const root = document.documentElement.style;
   root.setProperty('--halo-rgb', `255,${g},${b}`);
   drawSpark();
   requestAnimationFrame(tick);
-})();
+}
+// schedule (don't run now) so the sparkline's consts below are initialized first
+requestAnimationFrame(tick);
 
 // ---- activity sparkline (~20s history), so you can see recent noise at a glance ----
 const N = 100, hist = new Float32Array(N);
