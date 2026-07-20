@@ -19,6 +19,7 @@
     --level:0;             /* instantaneous audio level 0..1 */
     --activity:0;          /* sustained-activity accumulator 0..1 */
     --halo-rgb:255,178,122;/* halo colour, warms amber->red with activity */
+    --maxw:720px;          /* display cap = source frame width (set by app.js) */
   }
   *{box-sizing:border-box}
   html,body{height:100%}
@@ -67,7 +68,10 @@
 
   .viewport{position:relative; align-self:center; width:100%; display:flex; align-items:center; justify-content:center}
   video{
-    display:block; width:100%; max-height:72dvh; height:auto; object-fit:contain;
+    /* never upscale past the native frame size -> stays crisp on desktop;
+       still shrinks to fit narrow (mobile) screens and short windows */
+    display:block; width:auto; height:auto; margin-inline:auto;
+    max-width:min(var(--maxw), 100%); max-height:72dvh;
     background:#05060d; border-radius:20px;
     box-shadow:
       0 0 0 1px var(--hair),
@@ -111,7 +115,8 @@
 
   @media (max-width:520px){
     .stage{gap:10px}
-    video{max-height:none; border-radius:16px}
+    /* phones: fill the narrow screen (upscale is fine at this size) */
+    video{max-width:100%; max-height:none; border-radius:16px}
     .veil{border-radius:16px}
   }
   @media (prefers-reduced-motion:reduce){

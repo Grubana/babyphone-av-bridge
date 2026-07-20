@@ -9,6 +9,14 @@ const video = $('v'), statusEl = $('status'), statusText = $('statusText');
 const veil = $('veil'), veilText = $('veilText'), soundBtn = $('soundBtn');
 const spark = $('spark'), sctx = spark.getContext('2d');
 
+// Cap the on-screen size to the source's native frame width so a small stream
+// isn't upscaled into a blurry mess on desktop (mobile still fills the screen).
+function fitToSource() {
+  if (video.videoWidth) document.documentElement.style.setProperty('--maxw', video.videoWidth + 'px');
+}
+video.addEventListener('loadedmetadata', fitToSource);
+video.addEventListener('resize', fitToSource);
+
 // maxDelay bounds latency (jMuxer eases toward the live edge) and clearBuffer drops
 // played data so the buffer can't grow without bound. Keep it generous (~700ms) so
 // it corrects gently — a tight value seeks constantly at 10fps and looks like judder.
