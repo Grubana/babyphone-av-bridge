@@ -5,6 +5,7 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
+#include <ctime>
 #include <cstdio>
 #include <cerrno>
 
@@ -16,61 +17,105 @@ static const unsigned char* findReply(uint16_t cmd, size_t& len) {
     return nullptr;
 }
 
-// --- diagnostic helpers (temporary instrumentation) ---
-static void dumpBody(const char* tag, const std::vector<uint8_t>& b) {
-    char hex[3 * 32 + 1]; size_t n = b.size() < 32 ? b.size() : 32, k = 0;
-    for (size_t i = 0; i < n; ++i) k += (size_t)std::snprintf(hex + k, sizeof(hex) - k, "%02x ", b[i]);
-    char asc[33]; size_t m = b.size() < 32 ? b.size() : 32;
-    for (size_t i = 0; i < m; ++i) asc[i] = (b[i] >= 32 && b[i] < 127) ? (char)b[i] : '.';
-    asc[m] = 0;
-    std::fprintf(stderr, "[emu]   %s bodylen=%zu hex=%s| %s\n", tag, b.size(), hex, asc);
+static long nowMs() {
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<long>(ts.tv_sec) * 1000L + ts.tv_nsec / 1000000L;
 }
 
+// The real monitor is the ACTIVE side: after the announce it PROACTIVELY polls the
+// camera with this exact command sequence (captured identically across sessions),
+// and the camera answers each. Being reactive (only replying to camera frames) is
+// why the emulator stalled after 0x0017 -- the camera was waiting for these polls.
+// 0x0024 is the ONE camera-initiated request (camera asks for the monitor's
+// firmware info) and is answered reactively, so it is NOT in this proactive list.
+static const uint16_t kScript[] = {
+    0x000d,  // START/enable stream (kicks the camera into sending A/V)
+    0x001b, 0x0027, 0x0008, 0x000b, 0x0017, 0x0006,
+    0x001f, 0x0005, 0x000a, 0x001c, 0x0011,
+};
+static const size_t kScriptN = sizeof(kScript) / sizeof(kScript[0]);
+
+// After the handshake the monitor loops this poll cycle + a periodic heartbeat.
+static const uint16_t kSteady[] = { 0x0006, 0x0006, 0x0005 };
+
 void runMonitorEmulator(int camFd, StreamHub& hub) {
-    // Set an EXPLICIT 1s recv timeout so a read gap blocks (~1 wake/sec) instead of
-    // spinning — do NOT rely on the accepted socket inheriting the listener's timeout
-    // (it may not on this kernel, which would busy-loop and peg the CPU).
-    struct timeval tv; tv.tv_sec = 1; tv.tv_usec = 0;
+    // Short recv timeout so the loop wakes often enough to drive the proactive
+    // schedule even when the camera is quiet (but not a busy-spin).
+    struct timeval tv; tv.tv_sec = 0; tv.tv_usec = 100 * 1000;  // 100ms
     ::setsockopt(camFd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
     FrameReader reader;
     uint8_t buf[8192];
-    std::fprintf(stderr, "[emu] session start\n");
-    int nframes = 0;
+
+    bool loggedIn = false;
+    size_t scriptPos = 0;      // next proactive handshake poll to send
+    size_t steadyPos = 0;
+    long nextSendAt = 0;       // monotonic ms gate for the next proactive send
+    long lastHeartbeat = 0;
+    long media = 0;
+
+    auto sendCmd = [&](uint16_t cmd) -> bool {
+        size_t len = 0; const unsigned char* r = findReply(cmd, len);
+        if (!r) { std::fprintf(stderr, "[emu] !! no canned frame for 0x%04x\n", cmd); return false; }
+        return ::send(camFd, r, len, 0) == (ssize_t)len;
+    };
+
+    std::fprintf(stderr, "[emu] session start (proactive monitor driver)\n");
     while (true) {
+        long now = nowMs();
+
+        // ---- drive the monitor's proactive schedule ----
+        if (loggedIn && now >= nextSendAt) {
+            if (scriptPos < kScriptN) {
+                sendCmd(kScript[scriptPos]);
+                std::fprintf(stderr, "[emu] -> poll 0x%04x (%zu/%zu)\n",
+                             kScript[scriptPos], scriptPos + 1, kScriptN);
+                ++scriptPos;
+                nextSendAt = now + 60;                 // ~60ms between handshake polls
+            } else {
+                // steady state: heartbeat ~1/s + a rolling 0x0006/0x0006/0x0005 poll
+                if (now - lastHeartbeat >= 1000) {
+                    auto hb = buildFrame(12, {0x00, 0x01});
+                    ::send(camFd, hb.data(), hb.size(), 0);
+                    lastHeartbeat = now;
+                }
+                sendCmd(kSteady[steadyPos % 3]);
+                ++steadyPos;
+                nextSendAt = now + 300;                // steady poll cadence
+            }
+        }
+
+        // ---- read from the camera ----
         ssize_t n = ::recv(camFd, buf, sizeof(buf), 0);
-        if (n == 0) { std::fprintf(stderr, "[emu] session end: peer closed after %d frames\n", nframes); break; }
+        if (n == 0) { std::fprintf(stderr, "[emu] session end: peer closed (media=%ld)\n", media); break; }
         if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) continue;  // timeout: keep waiting, no log spam, no spin
-            std::fprintf(stderr, "[emu] session end: recv error errno=%d after %d frames\n", errno, nframes);
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) continue;  // timeout -> loop to drive sends
+            std::fprintf(stderr, "[emu] session end: recv error errno=%d (media=%ld)\n", errno, media);
             break;
         }
         for (auto& fr : reader.feed(buf, (size_t)n)) {
-            ++nframes;
             auto mu = extractMedia(fr);
-            if (mu) { std::fprintf(stderr, "[emu] recv MEDIA op=0x%04x len=%zu -> tap\n", fr.op(), fr.body.size()); hub.publish(*mu); continue; }
-            uint16_t cmd = fr.body.size() >= 2 ? (uint16_t)((fr.body[0] << 8) | fr.body[1]) : 0xffff;
-            std::fprintf(stderr, "[emu] recv type=%d cmd=0x%04x flag=%d\n", fr.type, cmd, fr.flag);
-            if (fr.type == 1 || fr.type == 7) dumpBody("body", fr.body);
-            if (fr.type == 1) {                                   // login -> announce
-                ssize_t s = ::send(camFd, monrep::announce, monrep::announce_len, 0);
-                std::fprintf(stderr, "[emu]   -> announce (%zu bytes, sent=%zd)\n", monrep::announce_len, s);
-                /* The real monitor PROACTIVELY sends CONTROL 0x000d (START/enable) right
-                 * after the announce (capture t=134ms, before the camera's control burst).
-                 * Replay it so the camera proceeds to streaming. */
-                size_t dl = 0; const unsigned char* dstart = findReply(0x000d, dl);
-                if (dstart) { ssize_t ds = ::send(camFd, dstart, dl, 0); std::fprintf(stderr, "[emu]   -> proactive 0x000d START (%zu bytes, sent=%zd)\n", dl, ds); }
-                else std::fprintf(stderr, "[emu]   !! no captured 0x000d to send\n");
-            } else if (fr.type == 7 && fr.body.size() >= 2) {     // control -> captured reply or echo
-                size_t rl = 0; const unsigned char* r = findReply(cmd, rl);
-                if (r) { ssize_t s = ::send(camFd, r, rl, 0); std::fprintf(stderr, "[emu]   -> captured reply cmd=0x%04x (%zu bytes, sent=%zd)\n", cmd, rl, s); }
-                else { auto echo = buildFrame(7, {fr.body[0], fr.body[1]}); ssize_t s = ::send(camFd, echo.data(), echo.size(), 0); std::fprintf(stderr, "[emu]   -> echo cmd=0x%04x (%zu bytes, sent=%zd) [NO captured reply]\n", cmd, echo.size(), s); }
-            } else if (fr.type == 12) {                           // heartbeat -> keepalive
-                auto ka = buildFrame(13, {0x00, 0x00});
-                ::send(camFd, ka.data(), ka.size(), 0);
-                std::fprintf(stderr, "[emu]   -> keepalive(13)\n");
-            } else {
-                std::fprintf(stderr, "[emu]   (no action for type=%d)\n", fr.type);
+            if (mu) {
+                if (++media <= 3 || media % 200 == 0)
+                    std::fprintf(stderr, "[emu] tap MEDIA op=0x%04x len=%zu (media#%ld)\n",
+                                 fr.op(), fr.body.size(), media);
+                hub.publish(*mu);
+                continue;
             }
+            uint16_t cmd = fr.body.size() >= 2 ? (uint16_t)((fr.body[0] << 8) | fr.body[1]) : 0xffff;
+            if (fr.type == 1 && !loggedIn) {           // LOGIN -> announce, then start the script
+                ::send(camFd, monrep::announce, monrep::announce_len, 0);
+                loggedIn = true;
+                long t = nowMs();
+                nextSendAt = t;                        // begin the proactive script now
+                lastHeartbeat = t;
+                std::fprintf(stderr, "[emu] login -> announce; starting proactive poll script\n");
+            } else if (fr.type == 7 && cmd == 0x0024) { // camera asks for monitor info -> answer
+                size_t rl = 0; const unsigned char* r = findReply(0x0024, rl);
+                if (r) { ::send(camFd, r, rl, 0); std::fprintf(stderr, "[emu] -> 0x0024 info reply (reactive)\n"); }
+            }
+            // All other camera frames (its answers to our polls, keepalives) need no
+            // reply -- the monitor drives on its own clock. Drained by the recv above.
         }
     }
 }
