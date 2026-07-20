@@ -3,7 +3,7 @@
 #include "frame.h"
 #include "media.h"
 #include <sys/socket.h>
-#include <sys/time.h>
+#include <poll.h>
 #include <unistd.h>
 #include <ctime>
 #include <cstdio>
@@ -39,21 +39,17 @@ static const size_t kScriptN = sizeof(kScript) / sizeof(kScript[0]);
 static const uint16_t kSteady[] = { 0x0006, 0x0006, 0x0005 };
 
 void runMonitorEmulator(int camFd, StreamHub& hub) {
-    // Short recv timeout so the loop wakes often enough to drive the proactive
-    // schedule even when the camera is quiet (but not a busy-spin).
-    struct timeval tv; tv.tv_sec = 0; tv.tv_usec = 100 * 1000;  // 100ms
-    ::setsockopt(camFd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
     FrameReader reader;
     uint8_t buf[8192];
 
-    bool loggedIn = false;
+    bool announced = false;    // announce has been sent (drives the poll script)
     size_t scriptPos = 0;      // next proactive handshake poll to send
     size_t steadyPos = 0;
     long nextSendAt = 0;       // monotonic ms gate for the next proactive send
     long lastHeartbeat = 0;
     long media = 0;
     long sessionStart = nowMs();
+    long connectAt = sessionStart;
     long lastReportAt = sessionStart;
     long lastReportMedia = 0;
     long videoFrames = 0, audioFrames = 0;
@@ -63,13 +59,26 @@ void runMonitorEmulator(int camFd, StreamHub& hub) {
         if (!r) { std::fprintf(stderr, "[emu] !! no canned frame for 0x%04x\n", cmd); return false; }
         return ::send(camFd, r, len, 0) == (ssize_t)len;
     };
+    auto beginDriving = [&](const char* why) {
+        long now = nowMs();
+        ::send(camFd, monrep::announce, monrep::announce_len, 0);
+        announced = true;
+        nextSendAt = now;                 // start the proactive script now
+        lastHeartbeat = now;
+        std::fprintf(stderr, "[emu] announce sent (%s); starting proactive poll script\n", why);
+    };
 
     std::fprintf(stderr, "[emu] session start (proactive monitor driver)\n");
     while (true) {
         long now = nowMs();
 
+        // Cold-start fallback: if the camera connects but stays silent (never
+        // sends LOGIN), announce anyway after a short wait so it isn't a deadlock
+        // (the real monitor announces right after login; here we bootstrap it).
+        if (!announced && now - connectAt > 1500) beginDriving("no login within 1.5s");
+
         // ---- drive the monitor's proactive schedule ----
-        if (loggedIn && now >= nextSendAt) {
+        if (announced && now >= nextSendAt) {
             if (scriptPos < kScriptN) {
                 sendCmd(kScript[scriptPos]);
                 std::fprintf(stderr, "[emu] -> poll 0x%04x (%zu/%zu)\n",
@@ -90,7 +99,7 @@ void runMonitorEmulator(int camFd, StreamHub& hub) {
         }
 
         // ---- periodic streaming health (so a long capture proves sustained flow) ----
-        if (loggedIn && now - lastReportAt >= 5000) {
+        if (announced && now - lastReportAt >= 5000) {
             long dt = now - lastReportAt, dm = media - lastReportMedia;
             std::fprintf(stderr, "[emu] alive t=%lds media=%ld (+%ld, ~%ld/s) video=%ld audio=%ld\n",
                          (now - sessionStart) / 1000, media, dm, dm * 1000 / (dt ? dt : 1),
@@ -99,11 +108,20 @@ void runMonitorEmulator(int camFd, StreamHub& hub) {
             lastReportMedia = media;
         }
 
-        // ---- read from the camera ----
+        // ---- wait for readability with a RELIABLE timeout ----
+        // Do NOT rely on SO_RCVTIMEO here: on this kernel it is not honored, so a
+        // blocking recv() would freeze the proactive driver whenever the camera
+        // goes silent (the 45s startup stall + cold-boot deadlock). poll() gives us
+        // a dependable ~50ms wake so the schedule advances regardless of silence.
+        struct pollfd pfd; pfd.fd = camFd; pfd.events = POLLIN; pfd.revents = 0;
+        int pr = ::poll(&pfd, 1, 50);
+        if (pr == 0) continue;                         // timeout -> loop to drive sends
+        if (pr < 0) { if (errno == EINTR) continue; std::fprintf(stderr, "[emu] poll err errno=%d\n", errno); break; }
+
         ssize_t n = ::recv(camFd, buf, sizeof(buf), 0);
         if (n == 0) { std::fprintf(stderr, "[emu] session end: peer closed (media=%ld)\n", media); break; }
         if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) continue;  // timeout -> loop to drive sends
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) continue;
             std::fprintf(stderr, "[emu] session end: recv error errno=%d (media=%ld)\n", errno, media);
             break;
         }
@@ -120,13 +138,8 @@ void runMonitorEmulator(int camFd, StreamHub& hub) {
                 continue;
             }
             uint16_t cmd = fr.body.size() >= 2 ? (uint16_t)((fr.body[0] << 8) | fr.body[1]) : 0xffff;
-            if (fr.type == 1 && !loggedIn) {           // LOGIN -> announce, then start the script
-                ::send(camFd, monrep::announce, monrep::announce_len, 0);
-                loggedIn = true;
-                long t = nowMs();
-                nextSendAt = t;                        // begin the proactive script now
-                lastHeartbeat = t;
-                std::fprintf(stderr, "[emu] login -> announce; starting proactive poll script\n");
+            if (fr.type == 1 && !announced) {          // LOGIN -> announce, then start the script
+                beginDriving("login");
             } else if (fr.type == 7 && cmd == 0x0024) { // camera asks for monitor info -> answer
                 size_t rl = 0; const unsigned char* r = findReply(0x0024, rl);
                 if (r) { ::send(camFd, r, rl, 0); std::fprintf(stderr, "[emu] -> 0x0024 info reply (reactive)\n"); }
