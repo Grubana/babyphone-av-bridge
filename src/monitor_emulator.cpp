@@ -2,9 +2,12 @@
 #include "monitor_replies.h"
 #include "frame.h"
 #include "media.h"
+#include "relay.h"          // dialMonitor (reclaim probe)
 #include <sys/socket.h>
 #include <poll.h>
 #include <unistd.h>
+#include <atomic>
+#include <thread>
 #include <ctime>
 #include <cstdio>
 #include <cerrno>
@@ -38,9 +41,23 @@ static const size_t kScriptN = sizeof(kScript) / sizeof(kScript[0]);
 // After the handshake the monitor loops this poll cycle + a periodic heartbeat.
 static const uint16_t kSteady[] = { 0x0006, 0x0006, 0x0005 };
 
-void runMonitorEmulator(int camFd, StreamHub& hub) {
+void runMonitorEmulator(int camFd, StreamHub& hub, const std::string& monitorIp, uint16_t monitorPort) {
     FrameReader reader;
     uint8_t buf[8192];
+
+    // Reclaim probe: on a background thread (so it never hiccups the stream),
+    // check every ~5s whether the real monitor is back. If it is, flag it and the
+    // main loop returns -> the session ends -> the camera reconnects -> the bridge
+    // dials the monitor and tees (Mode A). Both monitor and web then work.
+    std::atomic<bool> monitorBack{false}, stopProbe{false};
+    std::thread probe([&]{
+        while (!stopProbe.load()) {
+            for (int i = 0; i < 50 && !stopProbe.load(); ++i) ::usleep(100 * 1000);  // ~5s, interruptible
+            if (stopProbe.load()) break;
+            int fd = dialMonitor(monitorIp, monitorPort, 400);
+            if (fd >= 0) { ::close(fd); monitorBack.store(true); break; }
+        }
+    });
 
     bool announced = false;    // announce has been sent (drives the poll script)
     size_t scriptPos = 0;      // next proactive handshake poll to send
@@ -71,6 +88,13 @@ void runMonitorEmulator(int camFd, StreamHub& hub) {
     std::fprintf(stderr, "[emu] session start (proactive monitor driver)\n");
     while (true) {
         long now = nowMs();
+
+        // Real monitor is back -> end the emulated session so the camera reconnects
+        // and the bridge hands it to the monitor (Mode A tee).
+        if (monitorBack.load()) {
+            std::fprintf(stderr, "[emu] real monitor is back -> ending Mode B to hand back (media=%ld)\n", media);
+            break;
+        }
 
         // Cold-start fallback: if the camera connects but stays silent (never
         // sends LOGIN), announce anyway after a short wait so it isn't a deadlock
@@ -148,6 +172,8 @@ void runMonitorEmulator(int camFd, StreamHub& hub) {
             // reply -- the monitor drives on its own clock. Drained by the recv above.
         }
     }
+    stopProbe.store(true);
+    probe.join();
 }
 
 } // namespace babycam

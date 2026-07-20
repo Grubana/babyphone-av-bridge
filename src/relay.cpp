@@ -117,7 +117,7 @@ void Relay::session(int camFd) {
         std::fprintf(stderr, "[proto s%d %+7ldms] ==== SESSION END mode=A ====\n", sess, nowMs() - t0);
     } else {
         std::fprintf(stderr, "[proto s%d %+7ldms] ==== SESSION START mode=B (emulate, monitor DOWN) ====\n", sess, 0L);
-        runMonitorEmulator(camFd, hub_);                          // emulate + tap
+        runMonitorEmulator(camFd, hub_, monitorIp_, monitorPort_);  // emulate + tap + reclaim
         std::fprintf(stderr, "[proto s%d %+7ldms] ==== SESSION END mode=B ====\n", sess, nowMs() - t0);
     }
     ::close(camFd);
