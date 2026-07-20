@@ -53,6 +53,10 @@ void runMonitorEmulator(int camFd, StreamHub& hub) {
     long nextSendAt = 0;       // monotonic ms gate for the next proactive send
     long lastHeartbeat = 0;
     long media = 0;
+    long sessionStart = nowMs();
+    long lastReportAt = sessionStart;
+    long lastReportMedia = 0;
+    long videoFrames = 0, audioFrames = 0;
 
     auto sendCmd = [&](uint16_t cmd) -> bool {
         size_t len = 0; const unsigned char* r = findReply(cmd, len);
@@ -85,6 +89,16 @@ void runMonitorEmulator(int camFd, StreamHub& hub) {
             }
         }
 
+        // ---- periodic streaming health (so a long capture proves sustained flow) ----
+        if (loggedIn && now - lastReportAt >= 5000) {
+            long dt = now - lastReportAt, dm = media - lastReportMedia;
+            std::fprintf(stderr, "[emu] alive t=%lds media=%ld (+%ld, ~%ld/s) video=%ld audio=%ld\n",
+                         (now - sessionStart) / 1000, media, dm, dm * 1000 / (dt ? dt : 1),
+                         videoFrames, audioFrames);
+            lastReportAt = now;
+            lastReportMedia = media;
+        }
+
         // ---- read from the camera ----
         ssize_t n = ::recv(camFd, buf, sizeof(buf), 0);
         if (n == 0) { std::fprintf(stderr, "[emu] session end: peer closed (media=%ld)\n", media); break; }
@@ -96,9 +110,12 @@ void runMonitorEmulator(int camFd, StreamHub& hub) {
         for (auto& fr : reader.feed(buf, (size_t)n)) {
             auto mu = extractMedia(fr);
             if (mu) {
-                if (++media <= 3 || media % 200 == 0)
+                ++media;
+                int op = fr.op();
+                if (op == 0x0201) ++audioFrames; else ++videoFrames;  // 0x0000 key / 0x0100 inter
+                if (media <= 3 || media % 200 == 0)
                     std::fprintf(stderr, "[emu] tap MEDIA op=0x%04x len=%zu (media#%ld)\n",
-                                 fr.op(), fr.body.size(), media);
+                                 op, fr.body.size(), media);
                 hub.publish(*mu);
                 continue;
             }
