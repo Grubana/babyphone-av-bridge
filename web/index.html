@@ -20,6 +20,7 @@
     --activity:0;          /* sustained-activity accumulator 0..1 */
     --halo-rgb:255,178,122;/* halo colour, warms amber->red with activity */
     --maxw:720px;          /* display cap = source frame width (set by app.js) */
+    --ar:16 / 9;           /* frame aspect = source aspect (set by app.js) */
   }
   *{box-sizing:border-box}
   html,body{height:100%}
@@ -66,13 +67,13 @@
   @keyframes breathe{0%,100%{opacity:.4;transform:scale(.8)}50%{opacity:1;transform:scale(1.15)}}
   @keyframes blink{0%,100%{opacity:1}50%{opacity:.25}}
 
-  .viewport{position:relative; align-self:center; width:100%; display:flex; align-items:center; justify-content:center}
-  video{
-    /* never upscale past the native frame size -> stays crisp on desktop;
-       still shrinks to fit narrow (mobile) screens and short windows */
-    display:block; width:auto; height:auto; margin-inline:auto;
-    max-width:min(var(--maxw), 100%); max-height:72dvh;
-    background:#05060d; border-radius:20px;
+  .viewport{align-self:center; width:100%; display:flex; align-items:center; justify-content:center}
+  /* one box: sized to the source (crisp, never upscaled past native on desktop);
+     the video and the veil both fill it, so there's never a nested-box look */
+  .frame{
+    position:relative; width:min(var(--maxw), 100%); margin:0 auto;
+    aspect-ratio:var(--ar); max-height:72dvh;
+    border-radius:20px; overflow:hidden; background:#05060d;
     box-shadow:
       0 0 0 1px var(--hair),
       0 18px 50px rgba(0,0,0,.55),
@@ -80,10 +81,11 @@
         rgba(var(--halo-rgb), calc(.10 + var(--level)*.55));
     transition:box-shadow .12s linear;
   }
+  video{position:absolute; inset:0; width:100%; height:100%; object-fit:contain; display:block}
   .veil{
     position:absolute; inset:0; display:flex; flex-direction:column; gap:16px;
     align-items:center; justify-content:center; text-align:center;
-    background:rgba(7,9,18,.82); border-radius:20px; backdrop-filter:blur(4px);
+    background:rgba(7,9,18,.82); backdrop-filter:blur(4px);
     color:var(--muted); font-size:14px; transition:opacity .3s ease; padding:20px;
   }
   .veil.hidden{opacity:0; pointer-events:none}
@@ -116,8 +118,7 @@
   @media (max-width:520px){
     .stage{gap:10px}
     /* phones: fill the narrow screen (upscale is fine at this size) */
-    video{max-width:100%; max-height:none; border-radius:16px}
-    .veil{border-radius:16px}
+    .frame{width:100%; max-height:none; border-radius:16px}
   }
   @media (prefers-reduced-motion:reduce){
     .status .dot,.spinner{animation:none}
@@ -136,10 +137,12 @@
   </header>
 
   <div class="viewport">
-    <video id="v" autoplay muted playsinline></video>
-    <div class="veil" id="veil">
-      <div class="spinner"></div>
-      <p id="veilText">Connecting to the camera…</p>
+    <div class="frame">
+      <video id="v" autoplay muted playsinline></video>
+      <div class="veil" id="veil">
+        <div class="spinner"></div>
+        <p id="veilText">Connecting to the camera…</p>
+      </div>
     </div>
   </div>
 

@@ -12,7 +12,10 @@ const spark = $('spark'), sctx = spark.getContext('2d');
 // Cap the on-screen size to the source's native frame width so a small stream
 // isn't upscaled into a blurry mess on desktop (mobile still fills the screen).
 function fitToSource() {
-  if (video.videoWidth) document.documentElement.style.setProperty('--maxw', video.videoWidth + 'px');
+  if (!video.videoWidth) return;
+  const s = document.documentElement.style;
+  s.setProperty('--maxw', video.videoWidth + 'px');
+  s.setProperty('--ar', video.videoWidth + ' / ' + video.videoHeight);
 }
 video.addEventListener('loadedmetadata', fitToSource);
 video.addEventListener('resize', fitToSource);
