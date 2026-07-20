@@ -4,42 +4,49 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0f1226">
-<title>Nursery · Live</title>
+<title>Baby Monitor · Live</title>
 <style>
   :root{
-    --night:#12162b;      /* deep night-blue */
-    --night-edge:#0b0e1e;  /* vignette edge */
+    --night:#12162b;
+    --night-edge:#0b0e1e;
     --panel:rgba(28,34,58,.55);
     --hair:rgba(160,168,214,.14);
     --ink:#edecfb;
     --muted:#8a90bd;
-    --glow:#ffb27a;        /* nightlight amber — the one accent */
+    --glow:#ffb27a;
     --glow-soft:rgba(255,178,122,.5);
-    --down:#f0868a;        /* connection lost */
-    --level:0;             /* live audio level 0..1, set by app.js */
+    --down:#f0868a;
+    --level:0;             /* instantaneous audio level 0..1 */
+    --activity:0;          /* sustained-activity accumulator 0..1 */
+    --halo-rgb:255,178,122;/* halo colour, warms amber->red with activity */
   }
   *{box-sizing:border-box}
   html,body{height:100%}
   body{
     margin:0; color:var(--ink);
     font-family:ui-rounded,"SF Pro Rounded","Hiragino Maru Gothic ProN","Segoe UI",system-ui,-apple-system,sans-serif;
-    background:
-      radial-gradient(120% 90% at 50% -10%, #1b2142 0%, var(--night) 45%, var(--night-edge) 100%);
+    background:radial-gradient(120% 90% at 50% -10%, #1b2142 0%, var(--night) 45%, var(--night-edge) 100%);
     -webkit-font-smoothing:antialiased;
   }
   .stage{
+    position:relative; z-index:1;
     min-height:100dvh; display:grid; grid-template-rows:auto 1fr auto;
     padding:max(14px,env(safe-area-inset-top)) 16px max(14px,env(safe-area-inset-bottom));
     gap:14px;
   }
 
-  /* ---- bars ---- */
-  .bar{display:flex; align-items:center; justify-content:space-between; gap:12px}
-  .brand{
-    display:flex; align-items:center; gap:9px;
-    font-weight:700; font-size:16px; letter-spacing:.02em;
+  /* rising red as ongoing activity accumulates — visible from across the room */
+  .alarm{
+    position:fixed; inset:0; z-index:0; pointer-events:none;
+    opacity:var(--activity); transition:opacity .5s ease;
+    box-shadow:inset 0 0 calc(40px + var(--activity)*160px) calc(var(--activity)*36px)
+      rgba(238,78,78, calc(.15 + var(--activity)*.5));
+    background:radial-gradient(130% 100% at 50% 50%, transparent 52%, rgba(210,50,50, calc(var(--activity)*.28)) 100%);
   }
-  .moon{width:16px;height:16px;color:var(--glow);filter:drop-shadow(0 0 5px var(--glow-soft))}
+
+  .bar{display:flex; align-items:center; justify-content:space-between; gap:12px; min-height:34px}
+  .spark{width:min(46vw,240px); height:30px; display:block; opacity:.95}
+
   .status{
     display:inline-flex; align-items:center; gap:8px;
     padding:6px 12px 6px 10px; border-radius:999px;
@@ -52,47 +59,41 @@
     box-shadow:0 0 9px var(--glow); animation:breathe 2.6s ease-in-out infinite;
   }
   .status.live{color:var(--ink)}
+  .status.down{color:var(--down)}
   .status.down .dot{background:var(--down);box-shadow:0 0 9px var(--down);animation:blink 1s steps(2,jump-none) infinite}
   .status.wait .dot{animation:breathe 1.6s ease-in-out infinite}
   @keyframes breathe{0%,100%{opacity:.4;transform:scale(.8)}50%{opacity:1;transform:scale(1.15)}}
   @keyframes blink{0%,100%{opacity:1}50%{opacity:.25}}
 
-  /* ---- video + sound halo (the signature) ---- */
-  .viewport{
-    position:relative; align-self:center; width:100%;
-    display:flex; align-items:center; justify-content:center;
-  }
+  .viewport{position:relative; align-self:center; width:100%; display:flex; align-items:center; justify-content:center}
   video{
     display:block; width:100%; max-height:72dvh; height:auto; object-fit:contain;
     background:#05060d; border-radius:20px;
-    /* baseline nightlight warmth, swelling with the baby's sound level */
     box-shadow:
       0 0 0 1px var(--hair),
       0 18px 50px rgba(0,0,0,.55),
       0 0 calc(24px + var(--level)*120px) calc(var(--level)*10px)
-        rgba(255,178,122, calc(.10 + var(--level)*.55));
+        rgba(var(--halo-rgb), calc(.10 + var(--level)*.55));
     transition:box-shadow .12s linear;
   }
   .veil{
     position:absolute; inset:0; display:flex; flex-direction:column; gap:16px;
     align-items:center; justify-content:center; text-align:center;
-    background:rgba(7,9,18,.72); border-radius:20px; backdrop-filter:blur(3px);
-    color:var(--muted); font-size:14px; transition:opacity .35s ease;
+    background:rgba(7,9,18,.82); border-radius:20px; backdrop-filter:blur(4px);
+    color:var(--muted); font-size:14px; transition:opacity .3s ease; padding:20px;
   }
   .veil.hidden{opacity:0; pointer-events:none}
   .spinner{
     width:34px;height:34px;border-radius:50%;
-    border:2.5px solid var(--hair); border-top-color:var(--glow);
-    animation:spin 1s linear infinite;
+    border:2.5px solid var(--hair); border-top-color:var(--glow); animation:spin 1s linear infinite;
   }
   @keyframes spin{to{transform:rotate(360deg)}}
 
-  /* ---- controls ---- */
-  .bottom{justify-content:center; gap:12px}
+  .bottom{justify-content:center}
   .ctl{
     -webkit-tap-highlight-color:transparent;
     display:inline-flex; align-items:center; gap:9px;
-    padding:12px 18px; border-radius:14px; cursor:pointer;
+    padding:12px 20px; border-radius:14px; cursor:pointer;
     background:var(--panel); border:1px solid var(--hair); backdrop-filter:blur(8px);
     color:var(--ink); font:inherit; font-size:14px; font-weight:650;
     transition:border-color .2s ease, transform .08s ease, background .2s ease;
@@ -105,8 +106,6 @@
     background:linear-gradient(180deg, rgba(255,178,122,.22), rgba(255,178,122,.10));
     border-color:rgba(255,178,122,.55); color:#ffe6cf;
   }
-  .ctl .label{min-width:3.2em; text-align:left}
-  /* the sound icon's waves fade in only when audio is on */
   .ctl .wave{opacity:.3; transition:opacity .2s}
   .ctl.on .wave{opacity:1}
 
@@ -114,22 +113,18 @@
     .stage{gap:10px}
     video{max-height:none; border-radius:16px}
     .veil{border-radius:16px}
-    .ctl .label{display:none}         /* icon-only buttons on small screens */
-    .ctl{padding:13px}
   }
   @media (prefers-reduced-motion:reduce){
     .status .dot,.spinner{animation:none}
-    video{transition:none}
+    video,.alarm{transition:none}
   }
 </style>
 </head>
 <body>
+<div class="alarm" id="alarm" aria-hidden="true"></div>
 <div class="stage">
   <header class="bar">
-    <div class="brand">
-      <svg class="moon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M21 12.8A8.5 8.5 0 1 1 11.2 3a6.8 6.8 0 0 0 9.8 9.8Z"/></svg>
-      Nursery
-    </div>
+    <canvas class="spark" id="spark" aria-hidden="true"></canvas>
     <div class="status" id="status" role="status" aria-live="polite">
       <span class="dot"></span><span id="statusText">Connecting</span>
     </div>
@@ -150,13 +145,7 @@
         <path class="wave" d="M16 9a4 4 0 0 1 0 6"/>
         <path class="wave" d="M19 6.5a8 8 0 0 1 0 11"/>
       </svg>
-      <span class="label">Sound</span>
-    </button>
-    <button class="ctl" id="fsBtn" title="Fullscreen">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>
-      </svg>
-      <span class="label">Full screen</span>
+      <span>Sound</span>
     </button>
   </footer>
 </div>

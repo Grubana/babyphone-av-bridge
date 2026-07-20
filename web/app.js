@@ -1,12 +1,24 @@
 'use strict';
 // Live baby-monitor player. Video: H.264 via jMuxer (MSE). Audio: G.711 µ-law via
 // Web Audio. WS frames are [tag, ...payload] where tag 0 = video, else audio.
+// Priority: the picture must be LIVE — we pin to the live edge and, if frames
+// stop, we say so rather than replay stale video.
 
 const $ = id => document.getElementById(id);
 const video = $('v'), statusEl = $('status'), statusText = $('statusText');
-const veil = $('veil'), veilText = $('veilText'), soundBtn = $('soundBtn'), fsBtn = $('fsBtn');
+const veil = $('veil'), veilText = $('veilText'), soundBtn = $('soundBtn');
+const spark = $('spark'), sctx = spark.getContext('2d');
 
-const jmuxer = new JMuxer({ node: 'v', mode: 'video', flushingTime: 100, fps: 10, debug: false });
+// maxDelay keeps jMuxer near the live edge; clearBuffer drops played data so the
+// buffer (and thus latency) can't grow without bound.
+function makeJmuxer() {
+  return new JMuxer({
+    node: 'v', mode: 'video', flushingTime: 50, maxDelay: 250,
+    clearBuffer: true, fps: 10, debug: false,
+    onError: () => resetStream('decoder error'),
+  });
+}
+let jmuxer = makeJmuxer();
 
 // ---- G.711 µ-law -> linear PCM ----
 const ulaw = (() => {
@@ -24,22 +36,51 @@ function decode(bytes) {
   return f;
 }
 
-// ---- sound halo: track audio level even while muted ----
-let level = 0, targetLevel = 0;
+// ---- activity model: instant level (halo) + sustained accumulator (red alarm) ----
+let level = 0, targetLevel = 0, activity = 0;
 function feedLevel(samples) {
   let sum = 0;
   for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
-  const rms = Math.sqrt(sum / samples.length);
-  // Map quiet-room→cry onto 0..1 with a small noise floor and generous gain.
-  const v = Math.min(1, Math.max(0, (rms - 0.004) * 9));
-  if (v > targetLevel) targetLevel = v;            // attack: jump up
+  const v = Math.min(1, Math.max(0, (Math.sqrt(sum / samples.length) - 0.004) * 9));
+  if (v > targetLevel) targetLevel = v;
 }
-(function animateHalo() {
-  targetLevel *= 0.86;                             // decay the peak
-  level += (targetLevel - level) * 0.35;           // smooth toward it
-  document.documentElement.style.setProperty('--level', level.toFixed(3));
-  requestAnimationFrame(animateHalo);
+const root = document.documentElement.style;
+(function tick() {
+  targetLevel *= 0.86;
+  level += (targetLevel - level) * 0.35;
+  // sustained activity rises while there's real sound, decays slowly when quiet
+  if (level > 0.16) activity = Math.min(1, activity + level * 0.012);
+  else activity = Math.max(0, activity - 0.0035);
+  root.setProperty('--level', level.toFixed(3));
+  root.setProperty('--activity', activity.toFixed(3));
+  // halo warms amber(255,178,122) -> alarm-red(245,95,95) as activity builds
+  const g = Math.round(178 + (95 - 178) * activity), b = Math.round(122 + (95 - 122) * activity);
+  root.setProperty('--halo-rgb', `255,${g},${b}`);
+  drawSpark();
+  requestAnimationFrame(tick);
 })();
+
+// ---- activity sparkline (~20s history), so you can see recent noise at a glance ----
+const N = 100, hist = new Float32Array(N);
+let dpr = 1;
+function sizeSpark() {
+  dpr = Math.min(2, window.devicePixelRatio || 1);
+  spark.width = spark.clientWidth * dpr; spark.height = spark.clientHeight * dpr;
+}
+window.addEventListener('resize', sizeSpark); sizeSpark();
+setInterval(() => { hist.copyWithin(0, 1); hist[N - 1] = level; }, 200);  // 100*200ms = 20s
+function drawSpark() {
+  const w = spark.width, h = spark.height; if (!w) return;
+  sctx.clearRect(0, 0, w, h);
+  const bw = w / N;
+  for (let i = 0; i < N; i++) {
+    const v = hist[i]; if (v < 0.02) continue;
+    const bh = Math.max(dpr, v * h);
+    const g = Math.round(178 + (95 - 178) * v), b = Math.round(122 + (95 - 122) * v);
+    sctx.fillStyle = `rgba(255,${g},${b},${0.3 + 0.6 * v})`;
+    sctx.fillRect(i * bw, h - bh, bw * 0.68, bh);
+  }
+}
 
 // ---- audio playback (opt-in; browsers block autoplay audio) ----
 let actx = null, playHead = 0, audioOn = false;
@@ -50,7 +91,7 @@ function playAudio(samples) {
   const src = actx.createBufferSource();
   src.buffer = buf; src.connect(actx.destination);
   const now = actx.currentTime;
-  if (playHead < now) playHead = now + 0.06;       // small jitter cushion
+  if (playHead < now) playHead = now + 0.06;
   src.start(playHead); playHead += buf.duration;
 }
 soundBtn.onclick = () => {
@@ -64,28 +105,41 @@ soundBtn.onclick = () => {
   soundBtn.title = audioOn ? 'Mute sound' : 'Turn sound on';
 };
 
-// ---- fullscreen ----
-fsBtn.onclick = () => {
-  const el = document.documentElement;
-  if (document.fullscreenElement) document.exitFullscreen();
-  else if (el.requestFullscreen) el.requestFullscreen();
-  else if (video.webkitEnterFullscreen) video.webkitEnterFullscreen(); // iOS Safari
-};
+// ---- keep the picture at the live edge (bounded latency, no replay of old video) ----
+setInterval(() => {
+  if (!video.buffered.length) return;
+  try {
+    const end = video.buffered.end(video.buffered.length - 1);
+    const gap = end - video.currentTime;
+    if (gap > 1.0) { video.currentTime = end - 0.15; video.playbackRate = 1; }
+    else if (gap > 0.45) video.playbackRate = 1.12;   // gently catch up
+    else video.playbackRate = 1;
+  } catch (e) {}
+}, 700);
+// Returning to a backgrounded tab: jump straight back to live.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden || !video.buffered.length) return;
+  try { video.currentTime = video.buffered.end(video.buffered.length - 1) - 0.15; } catch (e) {}
+});
 
-// ---- connection state ----
-let gotVideo = false, lastFrame = 0;
-function setState(kind, text) {
-  statusEl.className = 'status' + (kind ? ' ' + kind : '');
-  statusText.textContent = text;
-}
+// ---- connection / liveness state ----
+let gotVideo = false, lastFrame = 0, stalled = false;
+function setState(kind, text) { statusEl.className = 'status' + (kind ? ' ' + kind : ''); statusText.textContent = text; }
 function showVeil(text) { if (text) veilText.textContent = text; veil.classList.remove('hidden'); }
 function hideVeil() { veil.classList.add('hidden'); }
 
-// A monitor should never just die: reconnect forever, backing off to 5s.
+function resetStream(why) {           // flush stale video so we never show old frames
+  try { jmuxer.destroy(); } catch (e) {}
+  jmuxer = makeJmuxer();
+  lastFrame = 0;
+}
+
+// A monitor must never just die: reconnect forever, backing off to 5s.
 let ws = null, backoff = 500;
 function connect() {
+  resetStream('reconnect');
   setState(gotVideo ? 'wait' : '', gotVideo ? 'Reconnecting' : 'Connecting');
-  showVeil(gotVideo ? 'Reconnecting…' : 'Connecting to the camera…');
+  showVeil(gotVideo ? 'Reconnecting to the camera…' : 'Connecting to the camera…');
   ws = new WebSocket(`ws://${location.host}/ws`);
   ws.binaryType = 'arraybuffer';
   ws.onopen = () => { backoff = 500; setState('wait', 'Waiting for camera'); showVeil('Waiting for the camera…'); };
@@ -96,7 +150,7 @@ function connect() {
     if (a[0] === 0) {
       jmuxer.feed({ video: payload });
       lastFrame = performance.now();
-      gotVideo = true;
+      gotVideo = true; stalled = false;
       setState('live', 'Live'); hideVeil();
     } else {
       const s = decode(payload);
@@ -106,16 +160,18 @@ function connect() {
   ws.onclose = () => { setState('down', 'Offline'); scheduleReconnect(); };
   ws.onerror = () => { try { ws.close(); } catch (e) {} };
 }
-function scheduleReconnect() {
-  setTimeout(connect, backoff);
-  backoff = Math.min(backoff * 1.6, 5000);
-}
+function scheduleReconnect() { setTimeout(connect, backoff); backoff = Math.min(backoff * 1.6, 5000); }
 
-// Stall watchdog: connected but no frames for a while -> tell the user plainly.
+// Liveness watchdog: frames stopped -> say so and drop the stale picture (once),
+// don't fake "live". Clears itself when frames resume (stalled=false above).
 setInterval(() => {
-  if (ws && ws.readyState === WebSocket.OPEN && gotVideo && performance.now() - lastFrame > 4000) {
-    setState('wait', 'Waiting for camera'); showVeil('The camera stopped sending video.');
+  if (ws && ws.readyState === WebSocket.OPEN && gotVideo && !stalled
+      && performance.now() - lastFrame > 2500) {
+    stalled = true;
+    setState('down', 'No signal');
+    showVeil('Signal lost — waiting for live video.');
+    resetStream('stall');
   }
-}, 2000);
+}, 1000);
 
 connect();
