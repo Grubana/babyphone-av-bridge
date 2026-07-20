@@ -105,8 +105,6 @@ void runMonitorEmulator(int camFd, StreamHub& hub, const std::string& monitorIp,
         if (announced && now >= nextSendAt) {
             if (scriptPos < kScriptN) {
                 sendCmd(kScript[scriptPos]);
-                std::fprintf(stderr, "[emu] -> poll 0x%04x (%zu/%zu)\n",
-                             kScript[scriptPos], scriptPos + 1, kScriptN);
                 ++scriptPos;
                 nextSendAt = now + 60;                 // ~60ms between handshake polls
             } else {
@@ -122,8 +120,8 @@ void runMonitorEmulator(int camFd, StreamHub& hub, const std::string& monitorIp,
             }
         }
 
-        // ---- periodic streaming health (so a long capture proves sustained flow) ----
-        if (announced && now - lastReportAt >= 5000) {
+        // ---- periodic streaming health ----
+        if (announced && now - lastReportAt >= 30000) {
             long dt = now - lastReportAt, dm = media - lastReportMedia;
             std::fprintf(stderr, "[emu] alive t=%lds media=%ld (+%ld, ~%ld/s) video=%ld audio=%ld\n",
                          (now - sessionStart) / 1000, media, dm, dm * 1000 / (dt ? dt : 1),
@@ -153,11 +151,7 @@ void runMonitorEmulator(int camFd, StreamHub& hub, const std::string& monitorIp,
             auto mu = extractMedia(fr);
             if (mu) {
                 ++media;
-                int op = fr.op();
-                if (op == 0x0201) ++audioFrames; else ++videoFrames;  // 0x0000 key / 0x0100 inter
-                if (media <= 3 || media % 200 == 0)
-                    std::fprintf(stderr, "[emu] tap MEDIA op=0x%04x len=%zu (media#%ld)\n",
-                                 op, fr.body.size(), media);
+                if (fr.op() == 0x0201) ++audioFrames; else ++videoFrames;  // 0x0000 key / 0x0100 inter
                 hub.publish(*mu);
                 continue;
             }
@@ -166,7 +160,7 @@ void runMonitorEmulator(int camFd, StreamHub& hub, const std::string& monitorIp,
                 beginDriving("login");
             } else if (fr.type == 7 && cmd == 0x0024) { // camera asks for monitor info -> answer
                 size_t rl = 0; const unsigned char* r = findReply(0x0024, rl);
-                if (r) { ::send(camFd, r, rl, 0); std::fprintf(stderr, "[emu] -> 0x0024 info reply (reactive)\n"); }
+                if (r) ::send(camFd, r, rl, 0);
             }
             // All other camera frames (its answers to our polls, keepalives) need no
             // reply -- the monitor drives on its own clock. Drained by the recv above.
