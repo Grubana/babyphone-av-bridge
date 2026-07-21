@@ -20,14 +20,14 @@ function fitToSource() {
 video.addEventListener('loadedmetadata', fitToSource);
 video.addEventListener('resize', fitToSource);
 
-// maxDelay must be generous: it's the ONLY latency-control mechanism, and jMuxer
-// enforces it by seeking currentTime forward. A tight value seeks constantly at
-// 10fps and reads as judder, so keep a comfortable ceiling (~2.5s) — the buffer
-// sits well below it in normal play, so seeks are rare. clearBuffer drops played
+// maxDelay is the buffer ceiling = the glass-to-glass latency, and also the
+// cushion that keeps playback smooth. It's the ONLY seeking mechanism now (no
+// competing seekers), so it can be pulled fairly low without the old judder.
+// ~1s trades a little cushion for a much snappier feed. clearBuffer drops played
 // data so memory can't grow.
 function makeJmuxer() {
   return new JMuxer({
-    node: 'v', mode: 'video', flushingTime: 100, maxDelay: 2500,
+    node: 'v', mode: 'video', flushingTime: 100, maxDelay: 1000,
     clearBuffer: true, fps: 10, debug: false,
     onError: () => resetStream('decoder error'),
   });
