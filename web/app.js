@@ -20,12 +20,14 @@ function fitToSource() {
 video.addEventListener('loadedmetadata', fitToSource);
 video.addEventListener('resize', fitToSource);
 
-// maxDelay bounds latency (jMuxer eases toward the live edge) and clearBuffer drops
-// played data so the buffer can't grow without bound. Keep it generous (~700ms) so
-// it corrects gently — a tight value seeks constantly at 10fps and looks like judder.
+// maxDelay must be generous: it's the ONLY latency-control mechanism, and jMuxer
+// enforces it by seeking currentTime forward. A tight value seeks constantly at
+// 10fps and reads as judder, so keep a comfortable ceiling (~2.5s) — the buffer
+// sits well below it in normal play, so seeks are rare. clearBuffer drops played
+// data so memory can't grow.
 function makeJmuxer() {
   return new JMuxer({
-    node: 'v', mode: 'video', flushingTime: 100, maxDelay: 700,
+    node: 'v', mode: 'video', flushingTime: 100, maxDelay: 2500,
     clearBuffer: true, fps: 10, debug: false,
     onError: () => resetStream('decoder error'),
   });
@@ -116,18 +118,17 @@ soundBtn.onclick = () => {
   soundBtn.title = audioOn ? 'Mute sound' : 'Turn sound on';
 };
 
-// Backstop only: jMuxer's maxDelay handles routine drift smoothly. This just
-// catches a BIG divergence (e.g. after a network hiccup or a backgrounded tab)
-// with a single jump to live — rare, so normal playback is never disturbed.
-function jumpToLiveIfFarBehind(threshold) {
-  if (!video.buffered.length) return;
+// No routine seeking of our own — jMuxer's maxDelay is the single mechanism, so
+// we never fight it (competing seekers were the judder). Only exception: when the
+// tab is refocused after being backgrounded (buffer piles up while hidden), jump
+// once to live.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden || !video.buffered.length) return;
   try {
     const end = video.buffered.end(video.buffered.length - 1);
-    if (end - video.currentTime > threshold) video.currentTime = end - 0.3;
+    if (end - video.currentTime > 3) video.currentTime = end - 0.4;
   } catch (e) {}
-}
-setInterval(() => jumpToLiveIfFarBehind(2.0), 2000);
-document.addEventListener('visibilitychange', () => { if (!document.hidden) jumpToLiveIfFarBehind(1.0); });
+});
 
 // ---- connection / liveness state ----
 let gotVideo = false, lastFrame = 0, stalled = false;
