@@ -63,12 +63,8 @@ function tick() {
   // sustained activity rises while there's real sound, decays slowly when quiet
   if (level > 0.16) activity = Math.min(1, activity + level * 0.012);
   else activity = Math.max(0, activity - 0.0035);
-  root.setProperty('--level', level.toFixed(3));
+  root.setProperty('--level', level.toFixed(3));       // cheap: only drives opacity
   root.setProperty('--activity', activity.toFixed(3));
-  // halo warms amber(255,178,122) -> alarm-red(245,95,95) as activity builds
-  const g = Math.round(178 + (95 - 178) * activity), b = Math.round(122 + (95 - 122) * activity);
-  root.setProperty('--halo-rgb', `255,${g},${b}`);
-  drawSpark();
   requestAnimationFrame(tick);
 }
 // schedule (don't run now) so the sparkline's consts below are initialized first
@@ -83,6 +79,7 @@ function sizeSpark() {
 }
 window.addEventListener('resize', sizeSpark); sizeSpark();
 setInterval(() => { hist.copyWithin(0, 1); hist[N - 1] = level; }, 200);  // 100*200ms = 20s
+setInterval(drawSpark, 100);   // decoupled from the render loop; canvas only
 function drawSpark() {
   const w = spark.width, h = spark.height; if (!w) return;
   sctx.clearRect(0, 0, w, h);

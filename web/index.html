@@ -18,7 +18,6 @@
     --down:#f0868a;
     --level:0;             /* instantaneous audio level 0..1 */
     --activity:0;          /* sustained-activity accumulator 0..1 */
-    --halo-rgb:255,178,122;/* halo colour, warms amber->red with activity */
     --maxw:720px;          /* display cap = source frame width (set by app.js) */
     --ar:16 / 9;           /* frame aspect = source aspect (set by app.js) */
   }
@@ -37,13 +36,14 @@
     gap:14px;
   }
 
-  /* rising red as ongoing activity accumulates — visible from across the room */
+  /* rising red as ongoing activity accumulates — visible from across the room.
+     Static paint; ONLY opacity animates (compositor-only) so it never repaints
+     the video and causes judder. */
   .alarm{
     position:fixed; inset:0; z-index:0; pointer-events:none;
-    opacity:var(--activity); transition:opacity .5s ease;
-    box-shadow:inset 0 0 calc(40px + var(--activity)*160px) calc(var(--activity)*36px)
-      rgba(238,78,78, calc(.15 + var(--activity)*.5));
-    background:radial-gradient(130% 100% at 50% 50%, transparent 52%, rgba(210,50,50, calc(var(--activity)*.28)) 100%);
+    opacity:var(--activity); will-change:opacity; transition:opacity .5s ease;
+    box-shadow:inset 0 0 170px 44px rgba(238,78,78,.62);
+    background:radial-gradient(130% 100% at 50% 50%, transparent 50%, rgba(210,50,50,.3) 100%);
   }
 
   .bar{display:flex; align-items:center; justify-content:space-between; gap:12px; min-height:34px}
@@ -73,17 +73,22 @@
   .frame{
     position:relative; width:min(var(--maxw), 100%); margin:0 auto;
     aspect-ratio:var(--ar); max-height:72dvh;
-    border-radius:20px; overflow:hidden; background:#05060d;
-    box-shadow:
-      0 0 0 1px var(--hair),
-      0 18px 50px rgba(0,0,0,.55),
-      0 0 calc(24px + var(--level)*120px) calc(var(--level)*10px)
-        rgba(var(--halo-rgb), calc(.10 + var(--level)*.55));
-    transition:box-shadow .12s linear;
   }
-  video{position:absolute; inset:0; width:100%; height:100%; object-fit:contain; display:block}
+  /* sound halo: a pre-blurred amber layer behind the video. Only its opacity is
+     animated (--level) -> compositor-only, so the video never repaints. */
+  .glow{
+    position:absolute; inset:0; z-index:0; pointer-events:none; border-radius:20px;
+    background:rgba(255,178,122,.72); filter:blur(28px);
+    opacity:var(--level); will-change:opacity;
+  }
+  video{
+    position:absolute; inset:0; z-index:1; width:100%; height:100%; object-fit:contain;
+    display:block; border-radius:20px; background:#05060d;
+    box-shadow:0 0 0 1px var(--hair), 0 18px 50px rgba(0,0,0,.55);
+  }
   .veil{
-    position:absolute; inset:0; display:flex; flex-direction:column; gap:16px;
+    position:absolute; inset:0; z-index:2; border-radius:20px;
+    display:flex; flex-direction:column; gap:16px;
     align-items:center; justify-content:center; text-align:center;
     background:rgba(7,9,18,.82); backdrop-filter:blur(4px);
     color:var(--muted); font-size:14px; transition:opacity .3s ease; padding:20px;
@@ -118,7 +123,8 @@
   @media (max-width:520px){
     .stage{gap:10px}
     /* phones: fill the narrow screen (upscale is fine at this size) */
-    .frame{width:100%; max-height:none; border-radius:16px}
+    .frame{width:100%; max-height:none}
+    .glow,video,.veil{border-radius:16px}
   }
   @media (prefers-reduced-motion:reduce){
     .status .dot,.spinner{animation:none}
@@ -138,6 +144,7 @@
 
   <div class="viewport">
     <div class="frame">
+      <div class="glow" aria-hidden="true"></div>
       <video id="v" autoplay muted playsinline></video>
       <div class="veil" id="veil">
         <div class="spinner"></div>
