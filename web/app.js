@@ -1,23 +1,38 @@
 'use strict';
-// Live baby-monitor player.
-//   Video: WebCodecs VideoDecoder -> <canvas> (low latency, decode-and-paint).
-//          Falls back to jMuxer/MSE -> <video> where WebCodecs is unavailable.
-//   Audio: G.711 µ-law via Web Audio.
-// WS frames are [tag, ...payload]: tag 0 = video (Annex-B H.264), else audio.
+// Live baby-monitor player. Video: H.264 via jMuxer (MSE). Audio: G.711 µ-law via
+// Web Audio. WS frames are [tag, ...payload] where tag 0 = video, else audio.
+// Priority: the picture must be LIVE — we pin to the live edge and, if frames
+// stop, we say so rather than replay stale video.
 
 const $ = id => document.getElementById(id);
-const video = $('v'), canvas = $('canvas'), cctx = canvas.getContext('2d');
-const statusEl = $('status'), statusText = $('statusText');
+const video = $('v'), statusEl = $('status'), statusText = $('statusText');
 const veil = $('veil'), veilText = $('veilText'), soundBtn = $('soundBtn');
 const spark = $('spark'), sctx = spark.getContext('2d');
 
-// Cap the on-screen size to the source's native frame size (crisp on desktop).
-function fitToSource(w, h) {
-  if (!w || !h) return;
+// Cap the on-screen size to the source's native frame width so a small stream
+// isn't upscaled into a blurry mess on desktop (mobile still fills the screen).
+function fitToSource() {
+  if (!video.videoWidth) return;
   const s = document.documentElement.style;
-  s.setProperty('--maxw', w + 'px');
-  s.setProperty('--ar', w + ' / ' + h);
+  s.setProperty('--maxw', video.videoWidth + 'px');
+  s.setProperty('--ar', video.videoWidth + ' / ' + video.videoHeight);
 }
+video.addEventListener('loadedmetadata', fitToSource);
+video.addEventListener('resize', fitToSource);
+
+// maxDelay is the buffer ceiling = the glass-to-glass latency, and also the
+// cushion that keeps playback smooth. It's the ONLY seeking mechanism now (no
+// competing seekers), so it can be pulled fairly low without the old judder.
+// ~1s trades a little cushion for a much snappier feed. clearBuffer drops played
+// data so memory can't grow.
+function makeJmuxer() {
+  return new JMuxer({
+    node: 'v', mode: 'video', flushingTime: 100, maxDelay: 1000,
+    clearBuffer: true, fps: 10, debug: false,
+    onError: () => resetStream('decoder error'),
+  });
+}
+let jmuxer = makeJmuxer();
 
 // ---- G.711 µ-law -> linear PCM ----
 const ulaw = (() => {
@@ -29,7 +44,7 @@ const ulaw = (() => {
   }
   return t;
 })();
-function decodeAudio(bytes) {
+function decode(bytes) {
   const f = new Float32Array(bytes.length);
   for (let i = 0; i < bytes.length; i++) f[i] = ulaw[bytes[i]] / 32768;
   return f;
@@ -47,15 +62,17 @@ const root = document.documentElement.style;
 function tick() {
   targetLevel *= 0.86;
   level += (targetLevel - level) * 0.35;
+  // sustained activity rises while there's real sound, decays slowly when quiet
   if (level > 0.16) activity = Math.min(1, activity + level * 0.012);
   else activity = Math.max(0, activity - 0.0035);
-  root.setProperty('--level', level.toFixed(3));      // cheap: only drives opacity
+  root.setProperty('--level', level.toFixed(3));       // cheap: only drives opacity
   root.setProperty('--activity', activity.toFixed(3));
   requestAnimationFrame(tick);
 }
-requestAnimationFrame(tick);   // deferred so the sparkline consts below exist first
+// schedule (don't run now) so the sparkline's consts below are initialized first
+requestAnimationFrame(tick);
 
-// ---- activity sparkline (~20s history) ----
+// ---- activity sparkline (~20s history), so you can see recent noise at a glance ----
 const N = 100, hist = new Float32Array(N);
 let dpr = 1;
 function sizeSpark() {
@@ -63,8 +80,8 @@ function sizeSpark() {
   spark.width = spark.clientWidth * dpr; spark.height = spark.clientHeight * dpr;
 }
 window.addEventListener('resize', sizeSpark); sizeSpark();
-setInterval(() => { hist.copyWithin(0, 1); hist[N - 1] = level; }, 200);
-setInterval(drawSpark, 100);
+setInterval(() => { hist.copyWithin(0, 1); hist[N - 1] = level; }, 200);  // 100*200ms = 20s
+setInterval(drawSpark, 100);   // decoupled from the render loop; canvas only
 function drawSpark() {
   const w = spark.width, h = spark.height; if (!w) return;
   sctx.clearRect(0, 0, w, h);
@@ -101,118 +118,34 @@ soundBtn.onclick = () => {
   soundBtn.title = audioOn ? 'Mute sound' : 'Turn sound on';
 };
 
-// ---- connection / liveness state (shared by both video paths) ----
-let gotVideo = false, lastFrame = 0, stalled = false, sawVideoAt = 0;
-function setState(kind, text) { statusEl.className = 'status' + (kind ? ' ' + kind : ''); statusText.textContent = text; }
-function showVeil(text) { if (text) veilText.textContent = text; veil.classList.remove('hidden'); }
-function hideVeil() { veil.classList.add('hidden'); }
-function onVideoShown() {                       // a real frame reached the screen
-  lastFrame = performance.now();
-  gotVideo = true; stalled = false;
-  setState('live', 'Live'); hideVeil();
-}
-
-// ==== VIDEO ================================================================
-let videoMode = ('VideoDecoder' in window && 'EncodedVideoChunk' in window) ? 'wc' : 'mse';
-
-// ---- MSE fallback (jMuxer) ----
-let jmuxer = null;
-function makeJmuxer() {
-  return new JMuxer({
-    node: 'v', mode: 'video', flushingTime: 100, maxDelay: 1000,
-    clearBuffer: true, fps: 10, debug: false, onError: () => resetVideo(),
-  });
-}
-function feedMse(payload) {
-  if (!jmuxer) jmuxer = makeJmuxer();
-  jmuxer.feed({ video: payload });
-  onVideoShown();
-}
-function resetMse() { try { if (jmuxer) jmuxer.destroy(); } catch (e) {} jmuxer = null; }
-
-// ---- WebCodecs (primary) ----
-let decoder = null, decoderReady = false, wcTs = 0, wcFramesOut = 0;
-const hx = b => b.toString(16).padStart(2, '0');
-// Scan Annex-B for NAL units; returns [{type, pos}] (pos = index of NAL header).
-// A 3-byte 00 00 01 scan also catches 4-byte 00 00 00 01 (the 00 00 01 is inside).
-function scanNals(d) {
-  const out = [];
-  for (let i = 0; i + 3 < d.length; i++) {
-    if (d[i] === 0 && d[i + 1] === 0 && d[i + 2] === 1) { out.push({ type: d[i + 3] & 0x1f, pos: i + 3 }); i += 2; }
-  }
-  return out;
-}
-function paintFrame(frame) {
-  try {
-    if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
-      canvas.width = frame.displayWidth; canvas.height = frame.displayHeight;
-      fitToSource(frame.displayWidth, frame.displayHeight);
-    }
-    cctx.drawImage(frame, 0, 0);
-  } finally { frame.close(); }
-  wcFramesOut++;
-  onVideoShown();
-}
-function onDecErr(e) {
-  try { if (decoder) decoder.close(); } catch (_) {}
-  decoder = null; decoderReady = false;
-  if (wcFramesOut === 0) switchToMse();   // never worked -> abandon WebCodecs
-}
-function feedWc(payload) {
-  const nals = scanNals(payload);
-  const isKey = nals.some(x => x.type === 5 || x.type === 7);   // IDR or SPS present
-  if (!decoderReady) {
-    if (!isKey) return;                    // decoding must start on a keyframe
-    let codec = 'avc1.42E01E';             // sensible default (baseline 3.0)
-    const sps = nals.find(x => x.type === 7);
-    if (sps && sps.pos + 3 < payload.length)
-      codec = 'avc1.' + hx(payload[sps.pos + 1]) + hx(payload[sps.pos + 2]) + hx(payload[sps.pos + 3]);
-    try {
-      decoder = new VideoDecoder({ output: paintFrame, error: onDecErr });
-      decoder.configure({ codec, optimizeForLatency: true });
-      decoderReady = true; wcFramesOut = 0;
-    } catch (e) { console.warn('[avb] WebCodecs configure failed, using MSE:', e); switchToMse(); return feedMse(payload); }
-  }
-  try {
-    decoder.decode(new EncodedVideoChunk({ type: isKey ? 'key' : 'delta', timestamp: (wcTs += 100000), data: payload }));
-  } catch (e) { onDecErr(e); }
-}
-function resetWc() { try { if (decoder) decoder.close(); } catch (_) {} decoder = null; decoderReady = false; }
-function switchToMse() {
-  if (videoMode === 'mse') return;
-  console.warn('[avb] falling back to MSE video');
-  resetWc();
-  videoMode = 'mse';
-  canvas.classList.add('hide'); video.classList.remove('hide');
-}
-
-// ---- router ----
-function feedVideo(payload) {
-  if (!sawVideoAt) sawVideoAt = performance.now();
-  if (videoMode === 'wc') feedWc(payload); else feedMse(payload);
-}
-function resetVideo() { if (videoMode === 'wc') resetWc(); else resetMse(); lastFrame = 0; }
-
-// show the active surface
-if (videoMode === 'wc') video.classList.add('hide'); else canvas.classList.add('hide');
-video.addEventListener('loadedmetadata', () => fitToSource(video.videoWidth, video.videoHeight));
-video.addEventListener('resize', () => fitToSource(video.videoWidth, video.videoHeight));
-
-// Returning to a backgrounded tab (MSE only): jump once to live.
+// No routine seeking of our own — jMuxer's maxDelay is the single mechanism, so
+// we never fight it (competing seekers were the judder). Only exception: when the
+// tab is refocused after being backgrounded (buffer piles up while hidden), jump
+// once to live.
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden || videoMode !== 'mse' || !video.buffered.length) return;
+  if (document.hidden || !video.buffered.length) return;
   try {
     const end = video.buffered.end(video.buffered.length - 1);
     if (end - video.currentTime > 3) video.currentTime = end - 0.4;
   } catch (e) {}
 });
 
-// ==== connection ===========================================================
-function resetStream() { resetVideo(); }
+// ---- connection / liveness state ----
+let gotVideo = false, lastFrame = 0, stalled = false;
+function setState(kind, text) { statusEl.className = 'status' + (kind ? ' ' + kind : ''); statusText.textContent = text; }
+function showVeil(text) { if (text) veilText.textContent = text; veil.classList.remove('hidden'); }
+function hideVeil() { veil.classList.add('hidden'); }
 
+function resetStream(why) {           // flush stale video so we never show old frames
+  try { jmuxer.destroy(); } catch (e) {}
+  jmuxer = makeJmuxer();
+  lastFrame = 0;
+}
+
+// A monitor must never just die: reconnect forever, backing off to 5s.
 let ws = null, backoff = 500;
 function connect() {
-  resetStream();
+  resetStream('reconnect');
   setState(gotVideo ? 'wait' : '', gotVideo ? 'Reconnecting' : 'Connecting');
   showVeil(gotVideo ? 'Reconnecting to the camera…' : 'Connecting to the camera…');
   ws = new WebSocket(`ws://${location.host}/ws`);
@@ -222,27 +155,30 @@ function connect() {
     const a = new Uint8Array(ev.data);
     if (!a.length) return;
     const payload = a.subarray(1);
-    if (a[0] === 0) feedVideo(payload);
-    else { const s = decodeAudio(payload); feedLevel(s); playAudio(s); }
+    if (a[0] === 0) {
+      jmuxer.feed({ video: payload });
+      lastFrame = performance.now();
+      gotVideo = true; stalled = false;
+      setState('live', 'Live'); hideVeil();
+    } else {
+      const s = decode(payload);
+      feedLevel(s); playAudio(s);
+    }
   };
   ws.onclose = () => { setState('down', 'Offline'); scheduleReconnect(); };
   ws.onerror = () => { try { ws.close(); } catch (e) {} };
 }
 function scheduleReconnect() { setTimeout(connect, backoff); backoff = Math.min(backoff * 1.6, 5000); }
 
-// Liveness watchdog: frames stopped -> say so and drop the stale picture (once).
-// Also: if the WebCodecs path takes video packets but never paints, fall back.
+// Liveness watchdog: frames stopped -> say so and drop the stale picture (once),
+// don't fake "live". Clears itself when frames resume (stalled=false above).
 setInterval(() => {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  const now = performance.now();
-  if (videoMode === 'wc' && !gotVideo && sawVideoAt && now - sawVideoAt > 4000) {
-    switchToMse();
-  }
-  if (gotVideo && !stalled && now - lastFrame > 2500) {
+  if (ws && ws.readyState === WebSocket.OPEN && gotVideo && !stalled
+      && performance.now() - lastFrame > 2500) {
     stalled = true;
     setState('down', 'No signal');
     showVeil('Signal lost — waiting for live video.');
-    resetStream();
+    resetStream('stall');
   }
 }, 1000);
 

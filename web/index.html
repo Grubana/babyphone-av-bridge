@@ -81,15 +81,11 @@
     background:rgba(255,178,122,.72); filter:blur(28px);
     opacity:var(--level); will-change:opacity;
   }
-  /* the render surface: #canvas for the WebCodecs path, <video> for MSE fallback.
-     NOTE: scope to #canvas, not the bare `canvas` element — the sparkline is also
-     a <canvas> and must stay inline in the header. */
-  video,#canvas{
+  video{
     position:absolute; inset:0; z-index:1; width:100%; height:100%; object-fit:contain;
     display:block; border-radius:20px; background:#05060d;
     box-shadow:0 0 0 1px var(--hair), 0 18px 50px rgba(0,0,0,.55);
   }
-  .hide{display:none !important}
   .veil{
     position:absolute; inset:0; z-index:2; border-radius:20px;
     display:flex; flex-direction:column; gap:16px;
@@ -128,7 +124,7 @@
     .stage{gap:10px}
     /* phones: fill the narrow screen (upscale is fine at this size) */
     .frame{width:100%; max-height:none}
-    .glow,video,#canvas,.veil{border-radius:16px}
+    .glow,video,.veil{border-radius:16px}
   }
   @media (prefers-reduced-motion:reduce){
     .status .dot,.spinner{animation:none}
@@ -149,7 +145,6 @@
   <div class="viewport">
     <div class="frame">
       <div class="glow" aria-hidden="true"></div>
-      <canvas id="canvas"></canvas>
       <video id="v" autoplay muted playsinline></video>
       <div class="veil" id="veil">
         <div class="spinner"></div>
